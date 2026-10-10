@@ -3,9 +3,11 @@
 #include "InputManager.h"
 #include "EspNowTx.h"
 #include "Protocol.h"
+#include "WebServerManager.h"
 
 InputManager inputs;
 EspNowTx radio;
+WebServerManager web;
 
 // ==================================================
 // TIMING
@@ -35,13 +37,18 @@ void setup()
     Serial.println(" TX CONTROL");
     Serial.println("==============================");
 
-    inputs.begin();
+    // inputs.begin();
 
-    Serial.println("Inputs initialized");
+    // Serial.println("Inputs initialized");
 
-    if (!radio.begin())
+    // if (!radio.begin())
+    // {
+    //     Serial.println("ESP-NOW FAILED");
+    // }
+
+    if (!web.begin())
     {
-        Serial.println("ESP-NOW FAILED");
+        Serial.println("WEB FAILED");
     }
 
     Serial.println();
@@ -53,68 +60,5 @@ void setup()
 
 void loop()
 {
-    inputs.update();
-
-    const InputState &state =
-        inputs.getState();
-
-    const uint32_t now = millis();
-
-    // ------------------------------------------------
-    // SEND CONTROL PACKET
-    // ------------------------------------------------
-
-    if (now - lastSendMs >= SEND_INTERVAL_MS)
-    {
-        lastSendMs = now;
-
-        ControlPacket packet;
-
-        packet.sequence =
-            sequenceNumber++;
-
-        packet.throttle =
-            state.throttle;
-
-        packet.steering =
-            state.steering;
-
-        packet.buttonMask =
-            state.buttonMask;
-
-        if (!radio.send(packet))
-        {
-            Serial.println(
-                "ESP-NOW send error");
-        }
-    }
-
-    // ------------------------------------------------
-    // SERIAL DEBUG
-    // ------------------------------------------------
-
-    if (now - lastPrintMs >= PRINT_INTERVAL_MS)
-    {
-        lastPrintMs = now;
-
-        Serial.print("TX GAS:");
-        Serial.print(state.throttle);
-
-        Serial.print(" STYR:");
-        Serial.print(state.steering);
-
-        Serial.print(" BTN:0x");
-
-        if (state.buttonMask < 0x10)
-        {
-            Serial.print('0');
-        }
-
-        Serial.print(
-            state.buttonMask,
-            HEX);
-
-        Serial.print(" SEQ:");
-        Serial.println(sequenceNumber);
-    }
+    web.update();
 }
