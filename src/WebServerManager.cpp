@@ -1,5 +1,6 @@
 #include "WebServerManager.h"
 #include "RouteStorage.h"
+#include "DrawingStorage.h"
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -10,6 +11,7 @@ static const char *AP_PASSWORD = "roborock123";
 
 static WebServer server(80);
 static RouteStorage routeStorage;
+static DrawingStorage drawingStorage;
 
 static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -74,7 +76,7 @@ button, .fileButton {
 #canvasContainer {
     width: 100%;
     overflow: hidden;
-    background: white;
+    background: #ddd;
     border: 2px solid #666;
 }
 
@@ -88,7 +90,6 @@ canvas {
 }
 
 canvas.dragging { cursor: grabbing; }
-
 #status { font-weight: bold; }
 </style>
 </head>
@@ -104,10 +105,19 @@ canvas.dragging { cursor: grabbing; }
             <input id="dxfFile" type="file" accept=".dxf">
         </label>
 
+        <button id="saveDrawing">SPARA RITNING</button>
         <button id="fitButton">PASSA RITNING</button>
         <button id="zoomInButton">+</button>
         <button id="zoomOutButton">−</button>
-        <button id="clearDrawing">TA BORT RITNING</button>
+    </div>
+
+    <div class="toolbar">
+        <button id="saveShow">SPARA SHOWFIL</button>
+
+        <label class="fileButton">
+            LADDA SHOWFIL
+            <input id="showFile" type="file" accept=".json">
+        </label>
     </div>
 
     <div id="drawingInfo">Ingen ritning laddad</div>
@@ -130,6 +140,8 @@ const statusText = document.getElementById("status");
 
 let entities = [];
 let bounds = null;
+let currentDXF = "";
+let currentFileName = "";
 
 let scale = 1;
 let fitScale = 1;
@@ -169,7 +181,6 @@ function pairLines(text) {
 function parseDXF(text) {
     const pairs = pairLines(text);
     const result = [];
-
     let i = 0;
     let section = "";
 
@@ -297,7 +308,6 @@ function parseDXF(text) {
                     while (i < pairs.length && pairs[i].code !== 0) {
                         if (pairs[i].code === 10) point.x = Number(pairs[i].value);
                         if (pairs[i].code === 20) point.y = Number(pairs[i].value);
-
                         i++;
                     }
 
@@ -326,8 +336,7 @@ function parseDXF(text) {
 }
 
 function addBoundsPoint(b, x, y) {
-    if (!Number.isFinite(x) || !Number.isFinite(y))
-        return;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
 
     b.minX = Math.min(b.minX, x);
     b.maxX = Math.max(b.maxX, x);
@@ -348,12 +357,10 @@ function calculateBounds() {
             addBoundsPoint(b, e.x1, e.y1);
             addBoundsPoint(b, e.x2, e.y2);
         }
-
         else if (e.type === "POLYLINE") {
             for (const p of e.points)
                 addBoundsPoint(b, p.x, p.y);
         }
-
         else if (e.type === "CIRCLE" || e.type === "ARC") {
             addBoundsPoint(b, e.x - e.r, e.y - e.r);
             addBoundsPoint(b, e.x + e.r, e.y + e.r);
@@ -363,9 +370,25 @@ function calculateBounds() {
     return Number.isFinite(b.minX) ? b : null;
 }
 
+function loadDrawing(name, dxf) {
+    currentFileName = name;
+    currentDXF = dxf;
+
+    entities = parseDXF(dxf);
+    bounds = calculateBounds();
+
+    if (!bounds || !entities.length) {
+        setStatus("Ingen stödd geometri hittades");
+        return false;
+    }
+
+    showDrawingInfo();
+    fitDrawing();
+    return true;
+}
+
 function fitDrawing() {
-    if (!bounds)
-        return;
+    if (!bounds) return;
 
     const width = Math.max(bounds.maxX - bounds.minX, 1);
     const height = Math.max(bounds.maxY - bounds.minY, 1);
@@ -414,18 +437,13 @@ function getVisibleWorld() {
 }
 
 function drawGrid() {
-    if (!bounds)
-        return;
+    if (!bounds) return;
 
     const visible = getVisibleWorld();
-
     let grid = SMALL_GRID_MM;
 
-    if (grid * scale < 12)
-        grid = 1000;
-
-    if (grid * scale < 12)
-        grid = 5000;
+    if (grid * scale < 12) grid = 1000;
+    if (grid * scale < 12) grid = 5000;
 
     const startX = Math.floor(visible.minX / grid) * grid;
     const endX = Math.ceil(visible.maxX / grid) * grid;
@@ -438,7 +456,7 @@ function drawGrid() {
         const p = worldToScreen(x, 0);
 
         ctx.strokeStyle =
-            x % LARGE_GRID_MM === 0 ? "#c7c7c7" : "#e8e8e8";
+            x % LARGE_GRID_MM === 0 ? "#aaa" : "#c9c9c9";
 
         ctx.beginPath();
         ctx.moveTo(p.x, 0);
@@ -450,7 +468,7 @@ function drawGrid() {
         const p = worldToScreen(0, y);
 
         ctx.strokeStyle =
-            y % LARGE_GRID_MM === 0 ? "#c7c7c7" : "#e8e8e8";
+            y % LARGE_GRID_MM === 0 ? "#aaa" : "#c9c9c9";
 
         ctx.beginPath();
         ctx.moveTo(0, p.y);
@@ -475,8 +493,7 @@ function drawEntities() {
         }
 
         else if (e.type === "POLYLINE") {
-            if (e.points.length < 2)
-                continue;
+            if (e.points.length < 2) continue;
 
             let p = worldToScreen(e.points[0].x, e.points[0].y);
 
@@ -488,9 +505,7 @@ function drawEntities() {
                 ctx.lineTo(p.x, p.y);
             }
 
-            if (e.closed)
-                ctx.closePath();
-
+            if (e.closed) ctx.closePath();
             ctx.stroke();
         }
 
@@ -505,11 +520,14 @@ function drawEntities() {
         else if (e.type === "ARC") {
             const c = worldToScreen(e.x, e.y);
 
-            const start = -e.end * Math.PI / 180;
-            const end = -e.start * Math.PI / 180;
-
             ctx.beginPath();
-            ctx.arc(c.x, c.y, e.r * scale, start, end);
+            ctx.arc(
+                c.x,
+                c.y,
+                e.r * scale,
+                -e.end * Math.PI / 180,
+                -e.start * Math.PI / 180
+            );
             ctx.stroke();
         }
     }
@@ -521,30 +539,27 @@ function draw() {
     ctx.fillStyle = "#ddd";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    if (!bounds)
-        return;
+    if (!bounds) return;
 
     drawGrid();
     drawEntities();
 }
 
-function zoomAt(screenX, screenY, factor) {
-    if (!bounds)
-        return;
+function zoomAt(x, y, factor) {
+    if (!bounds) return;
 
-    const world = screenToWorld(screenX, screenY);
-    const newScale = Math.min(
+    const world = screenToWorld(x, y);
+
+    scale = Math.min(
         Math.max(scale * factor, fitScale * MIN_ZOOM),
         fitScale * MAX_ZOOM
     );
 
-    scale = newScale;
-
-    offsetX = screenX - world.x * scale;
-    offsetY = screenY + world.y * scale;
+    offsetX = x - world.x * scale;
+    offsetY = y + world.y * scale;
 
     draw();
-    updatePositionInfo(screenX, screenY);
+    updatePositionInfo(x, y);
 }
 
 function getCanvasPosition(event) {
@@ -563,11 +578,11 @@ function updatePositionInfo(x = null, y = null) {
         return;
     }
 
-    const zoomPercent = Math.round(scale / fitScale * 100);
+    const zoom = Math.round(scale / fitScale * 100);
 
     if (x === null || y === null) {
         positionInfo.innerHTML =
-            `X: ---- mm &nbsp; Y: ---- mm &nbsp; Zoom: ${zoomPercent}%`;
+            `X: ---- mm &nbsp; Y: ---- mm &nbsp; Zoom: ${zoom}%`;
         return;
     }
 
@@ -575,39 +590,29 @@ function updatePositionInfo(x = null, y = null) {
 
     positionInfo.innerHTML =
         `X: ${world.x.toFixed(0)} mm &nbsp; ` +
-        `Y: ${world.y.toFixed(0)} mm &nbsp; ` +
-        `Zoom: ${zoomPercent}%`;
+        `Y: ${world.y.toFixed(0)} mm &nbsp; Zoom: ${zoom}%`;
 }
 
-function showDrawingInfo(fileName) {
-    if (!bounds) {
-        drawingInfo.textContent = "Ingen geometri hittades";
-        return;
-    }
-
+function showDrawingInfo() {
     const width = bounds.maxX - bounds.minX;
     const height = bounds.maxY - bounds.minY;
 
     drawingInfo.textContent =
-        `${fileName} | ${entities.length} objekt | ` +
+        `${currentFileName} | ${entities.length} objekt | ` +
         `${(width / 1000).toFixed(2)} × ${(height / 1000).toFixed(2)} m`;
 }
 
 canvas.addEventListener("wheel", event => {
-    if (!bounds)
-        return;
+    if (!bounds) return;
 
     event.preventDefault();
 
     const p = getCanvasPosition(event);
-    const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
-
-    zoomAt(p.x, p.y, factor);
+    zoomAt(p.x, p.y, event.deltaY < 0 ? 1.15 : 1 / 1.15);
 }, { passive: false });
 
 canvas.addEventListener("pointerdown", event => {
-    if (!bounds)
-        return;
+    if (!bounds) return;
 
     const p = getCanvasPosition(event);
 
@@ -622,14 +627,13 @@ canvas.addEventListener("pointerdown", event => {
 });
 
 canvas.addEventListener("pointermove", event => {
-    if (!bounds)
-        return;
+    if (!bounds) return;
 
     const p = getCanvasPosition(event);
 
     if (dragging) {
-        offsetX = dragOffsetX + (p.x - dragStartX);
-        offsetY = dragOffsetY + (p.y - dragStartY);
+        offsetX = dragOffsetX + p.x - dragStartX;
+        offsetY = dragOffsetY + p.y - dragStartY;
         draw();
     }
 
@@ -647,72 +651,132 @@ function stopDragging(event) {
 canvas.addEventListener("pointerup", stopDragging);
 canvas.addEventListener("pointercancel", stopDragging);
 
-canvas.addEventListener("pointerleave", () => {
-    if (!dragging)
-        updatePositionInfo();
-});
-
 document.getElementById("fitButton").addEventListener("click", fitDrawing);
 
-document.getElementById("zoomInButton").addEventListener("click", () => {
-    zoomAt(canvas.width / 2, canvas.height / 2, 1.25);
-});
+document.getElementById("zoomInButton").addEventListener("click", () =>
+    zoomAt(canvas.width / 2, canvas.height / 2, 1.25)
+);
 
-document.getElementById("zoomOutButton").addEventListener("click", () => {
-    zoomAt(canvas.width / 2, canvas.height / 2, 1 / 1.25);
-});
+document.getElementById("zoomOutButton").addEventListener("click", () =>
+    zoomAt(canvas.width / 2, canvas.height / 2, 1 / 1.25)
+);
 
 document.getElementById("dxfFile").addEventListener("change", async event => {
     const file = event.target.files[0];
-
-    if (!file)
-        return;
+    if (!file) return;
 
     setStatus("Läser DXF...");
 
     try {
-        const text = await file.text();
+        const dxf = await file.text();
 
-        entities = parseDXF(text);
-        bounds = calculateBounds();
-
-        if (!bounds || !entities.length) {
-            entities = [];
-            bounds = null;
-            draw();
-            setStatus("Ingen stödd geometri hittades");
-            return;
-        }
-
-        showDrawingInfo(file.name);
-        fitDrawing();
-        setStatus("DXF laddad");
+        if (loadDrawing(file.name, dxf))
+            setStatus("DXF laddad - ej sparad i ESP32");
     }
-    catch (error) {
-        console.error(error);
+    catch {
         setStatus("Fel vid DXF-import");
     }
 });
 
-document.getElementById("clearDrawing").addEventListener("click", () => {
-    entities = [];
-    bounds = null;
+document.getElementById("saveDrawing").addEventListener("click", async () => {
+    if (!currentDXF) {
+        setStatus("Ingen ritning att spara");
+        return;
+    }
 
-    scale = 1;
-    fitScale = 1;
-    offsetX = 0;
-    offsetY = 0;
+    setStatus("Sparar ritning...");
 
-    document.getElementById("dxfFile").value = "";
+    try {
+        const response = await fetch("/drawing", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/octet-stream",
+                "X-Filename": encodeURIComponent(currentFileName)
+            },
+            body: currentDXF
+        });
 
-    drawingInfo.textContent = "Ingen ritning laddad";
-    updatePositionInfo();
-
-    setStatus("Ritningen borttagen");
-    draw();
+        setStatus(await response.text());
+    }
+    catch {
+        setStatus("Fel vid sparning");
+    }
 });
 
+document.getElementById("saveShow").addEventListener("click", () => {
+    if (!currentDXF) {
+        setStatus("Ingen ritning laddad");
+        return;
+    }
+
+    const show = {
+        version: 1,
+        drawing: {
+            fileName: currentFileName,
+            dxf: currentDXF
+        },
+        routes: []
+    };
+
+    const blob = new Blob(
+        [JSON.stringify(show)],
+        { type: "application/json" }
+    );
+
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "Roborock_Show.json";
+    link.click();
+
+    URL.revokeObjectURL(link.href);
+    setStatus("Showfil sparad till dator");
+});
+
+document.getElementById("showFile").addEventListener("change", async event => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    try {
+        const show = JSON.parse(await file.text());
+
+        if (!show.drawing || !show.drawing.dxf) {
+            setStatus("Ogiltig showfil");
+            return;
+        }
+
+        if (loadDrawing(show.drawing.fileName, show.drawing.dxf))
+            setStatus("Showfil laddad - tryck SPARA RITNING för ESP32");
+    }
+    catch {
+        setStatus("Felaktig showfil");
+    }
+});
+
+async function loadSavedDrawing() {
+    try {
+        const response = await fetch("/drawing");
+
+        if (response.status === 404)
+            return;
+
+        if (!response.ok)
+            return;
+
+        const name = decodeURIComponent(
+            response.headers.get("X-Filename") || "drawing.dxf"
+        );
+
+        const dxf = await response.text();
+
+        if (loadDrawing(name, dxf))
+            setStatus("Sparad ritning laddad");
+    }
+    catch {
+    }
+}
+
 draw();
+loadSavedDrawing();
 </script>
 </body>
 </html>
@@ -723,11 +787,56 @@ static void handleRoot()
     server.send_P(200, "text/html", INDEX_HTML);
 }
 
+static void handleGetDrawing()
+{
+    if (!drawingStorage.exists())
+    {
+        server.send(404, "text/plain", "");
+        return;
+    }
+
+    String name = drawingStorage.loadName();
+    String dxf = drawingStorage.loadDXF();
+
+    server.sendHeader("X-Filename", name);
+    server.send(200, "application/octet-stream", dxf);
+}
+
+static void handleSaveDrawing()
+{
+    if (!server.hasArg("plain"))
+    {
+        server.send(400, "text/plain", "Ingen ritning mottagen");
+        return;
+    }
+
+    String fileName = server.header("X-Filename");
+    if (fileName.length() == 0)
+        fileName = "drawing.dxf";
+
+    fileName.replace("%20", " ");
+
+    if (!drawingStorage.save(fileName, server.arg("plain")))
+    {
+        server.send(500, "text/plain", "Fel vid sparning");
+        return;
+    }
+
+    Serial.printf("Drawing saved: %u bytes\n", server.arg("plain").length());
+    server.send(200, "text/plain", "Ritning sparad i ESP32");
+}
+
 bool WebServerManager::begin()
 {
     if (!routeStorage.begin())
     {
         Serial.println("RouteStorage FAILED");
+        return false;
+    }
+
+    if (!drawingStorage.begin())
+    {
+        Serial.println("DrawingStorage FAILED");
         return false;
     }
 
@@ -740,7 +849,13 @@ bool WebServerManager::begin()
         return false;
     }
 
+    const char *headers[] = {"X-Filename"};
+    server.collectHeaders(headers, 1);
+
     server.on("/", HTTP_GET, handleRoot);
+    server.on("/drawing", HTTP_GET, handleGetDrawing);
+    server.on("/drawing", HTTP_POST, handleSaveDrawing);
+
     server.begin();
 
     Serial.println();
