@@ -50,9 +50,9 @@ canvas.dragging{cursor:grabbing}#status{font-weight:bold}
 #cueButtons{display:flex;gap:7px}
 #cueButtons button{width:52px;height:42px;padding:0;font-size:24px}
 #cueButtons button:disabled{opacity:.35;cursor:default}
+#undoButton:disabled{opacity:.35;cursor:default;}
 #cueButtons button.runAllowed{background:#20b84b;color:#fff;opacity:1;}
 #cueButtons button.runSelected{background:#20b84b;color:#fff;opacity:1;}
-
 
 #driveSlider{
     writing-mode:vertical-lr;
@@ -104,7 +104,7 @@ dialog::backdrop{background:#0008}
 </div>
 
 <div class="toolbar">
-<button id="panButton" class="active">REDIGERA</button>
+<button id="panButton">REDIGERA</button>
 <button id="newCueButton">NY CUE</button>
 <button id="straightButton">RAK</button>
 <button id="rotateButton">ROT</button>
@@ -173,9 +173,17 @@ dialog::backdrop{background:#0008}
 <dialog id="rotateDialog">
 <form method="dialog" class="cfg">
 <h3>ROTATION</h3>
-<label>Grader <input id="rotateDeg" type="number" step="1"></label>
-<label>Vänta efter <input id="rotateWait" type="number" min="0" step="0.1" value="0"></label>
-<div class="buttons"><button value="cancel">AVBRYT</button><button id="rotateSave" value="default">SPARA</button></div>
+
+<label>
+Grader
+<input id="rotateDeg" type="number" step="1">
+</label>
+
+<div class="buttons">
+<button value="cancel">AVBRYT</button>
+<button id="rotateSave" value="default">SPARA</button>
+</div>
+
 </form>
 </dialog>
 
@@ -195,6 +203,42 @@ dialog::backdrop{background:#0008}
 </form>
 </dialog>
 
+<dialog id="segmentDialog">
+<form method="dialog" class="cfg">
+
+<h3 id="segmentTitle">SEGMENT</h3>
+
+<label>
+<input id="segModePercent" type="radio" name="segSpeedMode" value="percent">
+Hastighet %
+</label>
+
+<label>
+<input id="segSpeedPct" type="number" min="1" max="100" step="1">
+</label>
+
+<label>
+<input id="segModeTime" type="radio" name="segSpeedMode" value="time">
+Tid sek
+</label>
+
+<label>
+<input id="segDuration" type="number" min="0.1" step="0.1">
+</label>
+
+<label>
+Vänta efter
+<input id="segWait" type="number" min="0" step="0.1">
+</label>
+
+<div class="buttons">
+<button value="cancel">AVBRYT</button>
+<button id="segmentSave" value="default">SPARA</button>
+</div>
+
+</form>
+</dialog>
+
 <script>
 const $=id=>document.getElementById(id),canvas=$("canvas"),ctx=canvas.getContext("2d");
 const drawingInfo=$("drawingInfo"),cueInfo=$("cueInfo"),cueList=$("cueList"),positionInfo=$("positionInfo"),statusText=$("status");
@@ -205,7 +249,10 @@ let tool="pan",routeDrawing=false,routeHover=null,splitAfter=-1;
 let scale=1,fitScale=1,offsetX=0,offsetY=0,dragging=false,dragStartX=0,dragStartY=0,dragOffsetX=0,dragOffsetY=0;
 let editMode=null,editPathIndex=-1,editNodeId=-1,editNodeLabel="",editNodeMoved=false,editNodeDownX=0,editNodeDownY=0;
 let dialogNodeId=-1,dialogNodeLabel="";
-let rotateTarget=null,rotateInsert=false;
+let rotateTarget=null,rotateInsert=false,reverseTarget=null,reverseInsert=false;
+let editEnabled=false;
+let expandedCueName=null;
+let segmentTarget=null;
 
 let vehicle={
     name:"Roborock",
@@ -228,7 +275,12 @@ function createEmptyCue(name,type="RAK"){
         path:[],
         rotateDeg:0,
         vandDir:1,
+
+        speedMode:"percent",
+        speedPct:100,
+        durationSec:1,
         waitSec:0,
+
         endOfCue:false
     };
 }
@@ -251,8 +303,9 @@ function updateSegmentButtons(){
 }
 
 function resetCues(){
-    nodes=[];cues=[];selectedCue=-1;cueNumber=0;activeCueName="";splitAfter=-1;
-    updateCueList();updateCueInfo();
+    nodes=[];cues=[];selectedCue=-1;cueNumber=0;activeCueName="";
+    splitAfter=-1;expandedCueName=null;
+    updateCueList();updateCueInfo();updateUndoButton();
 }
 
 function connectFrom(index,nodeId){
@@ -300,16 +353,38 @@ function insertSegment(type){
     const old=cues[splitAfter],seg=createEmptyCue(old.name,type);seg.startNode=old.endNode;
     if(old.endOfCue){old.endOfCue=false;seg.endOfCue=true}
     cues.splice(splitAfter+1,0,seg);selectedCue=splitAfter+1;splitAfter=-1;
+    updateUndoButton();
+
+    $("splitButton").classList.remove("active");
     updateCueList();updateCueInfo();draw();return seg;
+}
+
+function updateUndoButton(){
+    const segmentMode=
+        splitAfter>=0 ||
+        tool==="straight" ||
+        tool==="follow" ||
+        tool==="rotate" ||
+        tool==="reverse";
+
+    $("undoButton").disabled=!editEnabled&&!segmentMode;
 }
 
 function setTool(t){
     tool=t;routeHover=null;
-    panButton.classList.toggle("active",t==="pan");
+    panButton.classList.toggle("active",t==="pan"&&editEnabled);
     straightButton.classList.toggle("active",t==="straight");
     followButton.classList.toggle("active",t==="follow");
-    setStatus(t==="pan"?"Panorering / redigering":t==="straight"?"RAK: markera slutpunkt":"FÖLJ: håll nere och rita körvägen");
-    draw();
+    $("rotateButton").classList.toggle("active",t==="rotate");
+    $("reverseButton").classList.toggle("active",t==="reverse");
+    setStatus(
+        t==="straight"?"RAK: markera slutpunkt":
+        t==="follow"?"FÖLJ: håll nere och rita körvägen":
+        t==="rotate"?"ROT vald":
+        t==="reverse"?"VÄND vald":
+        editEnabled?"REDIGERA aktiv":"REDIGERA av"
+    );
+    updateUndoButton();draw();
 }
 
 function renameCue(index){
@@ -330,22 +405,85 @@ function renameCue(index){
 }
 
 function updateCueList(){
-    cueList.innerHTML="";let prev="",step=0;
+    cueList.innerHTML="";
+    let prev="",step=0;
+
     cues.forEach((cue,i)=>{
         if(cue.name!==prev){
-            prev=cue.name;step=1;
+            prev=cue.name;
+            step=1;
+
             const h=document.createElement("div");
-            Object.assign(h.style,{marginTop:"10px",marginBottom:"4px",fontWeight:"bold"});
-            h.textContent=cue.name;
-h.style.cursor="pointer";
-h.title="Klicka för att ändra Cue-namn";
-h.onclick=()=>renameCue(i);
-cueList.appendChild(h);
-        }else step++;
+            const open=expandedCueName===cue.name;
+
+            h.textContent=(open?"▼ ":"▶ ")+cue.name;
+            h.style.cursor="pointer";
+
+            Object.assign(h.style,{
+                marginTop:"10px",
+                marginBottom:"4px",
+                fontWeight:"bold",
+                padding:"6px 8px",
+                borderRadius:"6px",
+                background:open?"#1976d2":"transparent",
+                color:open?"#fff":"inherit"
+            });
+
+            h.onclick=()=>{
+                const same=expandedCueName===cue.name;
+
+                if(same){
+                    if(editEnabled){
+                        renameCue(i);
+                    }else{
+                        expandedCueName=null;
+                        selectedCue=-1;
+                    }
+                }else{
+                    expandedCueName=cue.name;
+                    selectedCue=i;
+                    splitAfter=-1;
+                    routeHover=null;
+                }
+
+                updateCueList();
+                updateCueInfo();
+                draw();
+            };
+
+            cueList.appendChild(h);
+        }else{
+            step++;
+        }
+
+        if(expandedCueName!==cue.name)return;
+
         const b=document.createElement("button");
         b.className="cueItem"+(i===selectedCue?" selected":"");
-        b.textContent=`${step}. ${cue.type}`+(cue.type==="ROT"?` ${cue.rotateDeg>0?"+":""}${cue.rotateDeg}°`:"")+(cue.endOfCue?" ■":"");
-        b.onclick=()=>{selectedCue=i;splitAfter=-1;routeHover=null;updateCueList();updateCueInfo();draw()};
+
+        b.textContent=
+            `${step}. ${cue.type}`+
+            (cue.type==="ROT"
+                ?` ${cue.rotateDeg>0?"+":""}${cue.rotateDeg}°`
+                :"")+
+            (cue.endOfCue?" ■":"");
+
+        b.onclick=()=>{
+    const alreadySelected=selectedCue===i;
+
+    selectedCue=i;
+    splitAfter=-1;
+    routeHover=null;
+
+    updateCueList();
+    updateCueInfo();
+    draw();
+
+    if(editEnabled && alreadySelected){
+        editSegmentSettings(cue);
+    }
+};
+
         cueList.appendChild(b);
     });
     updateSegmentButtons();
@@ -394,45 +532,13 @@ function updateCueInfo(){
     cueInfo.textContent=`${cue.name} | ${cue.type} | ${(cueLength(cue)/1000).toFixed(2)} m`;
 }
 
-function selectCue(dir){
-    if(!cues.length)return;
-    const name=currentCue()?.name;let i=selectedCue;
-
-    if(dir>0){
-        while(i<cues.length&&cues[i].name===name)i++;
-        if(i>=cues.length)return;
-    }else{
-        i--;
-        while(i>=0&&cues[i].name===name)i--;
-        if(i<0)return;
-        const prev=cues[i].name;
-        while(i>0&&cues[i-1].name===prev)i--;
-    }
-
-    selectedCue=i;splitAfter=-1;
-    updateCueList();updateCueInfo();draw();
-}
-
 function updateRunButtons(){
-    const prev=$("prevCueButton");
-    const next=$("nextCueButton");
-
+    const prev=$("prevCueButton"),next=$("nextCueButton");
     prev.classList.remove("runAllowed","runSelected");
     next.classList.remove("runAllowed","runSelected");
-
-    if(!simActive)return;
-
-    // Vid Cue-gräns är tillåtna val vita
-    if(!simRunEnabled)return;
-
-    // Den riktning jag valt blir grön direkt
-    if(simRunDir>0)
-        next.classList.add("runSelected");
-    else if(simRunDir<0)
-        prev.classList.add("runSelected");
-
-    // Först när vi faktiskt börjat röra oss
-    // blir motsatt riktning också tillåten/grön
+    if(!simActive||!simRunEnabled)return;
+    if(simRunDir>0)next.classList.add("runSelected");
+    else if(simRunDir<0)prev.classList.add("runSelected");
     if(simMovedAfterArm){
         prev.classList.add("runAllowed");
         next.classList.add("runAllowed");
@@ -440,38 +546,21 @@ function updateRunButtons(){
 }
 
 function updateBoundaryButtons(){
-    const prev=$("prevCueButton");
-    const next=$("nextCueButton");
-
+    const prev=$("prevCueButton"),next=$("nextCueButton");
     if(!simActive||simCueIndex<0)return;
-
     const name=cues[simCueIndex].name;
 
     if(simBoundary<0){
-        // Står vid START på aktuell Cue
-
         let i=simCueIndex-1;
         while(i>=0&&cues[i].name===name)i--;
-
-        // + kör aktuell Cue framåt
         next.disabled=false;
-
-        // - bara om det finns en tidigare Cue
         prev.disabled=i<0;
-
     }else if(simBoundary>0){
-        // Står vid SLUT på aktuell Cue
-
         let i=simCueIndex+1;
         while(i<cues.length&&cues[i].name===name)i++;
-
-        // - backar aktuell Cue
         prev.disabled=false;
-
-        // + bara om det finns en nästa Cue
         next.disabled=i>=cues.length;
     }
-
     updateRunButtons();
 }
 
@@ -479,32 +568,19 @@ $("nextCueButton").onclick=()=>{
     if(!simActive||simRunEnabled)return;
 
     if(simBoundary<0){
-        // står vid början av aktuell cue -> kör den framåt
         setSimSegment(cueStartIndex(simCueIndex),false,true);
     }else{
-        // står vid slutet -> välj nästa cue
-        const currentName=cues[simCueIndex].name;
+        const name=cues[simCueIndex].name;
         let i=simCueIndex+1;
-
-        while(i<cues.length&&cues[i].name===currentName)i++;
-        if(i>=cues.length){
-            setStatus("Ingen nästa Cue");
-            return;
-        }
-
+        while(i<cues.length&&cues[i].name===name)i++;
+        if(i>=cues.length){setStatus("Ingen nästa Cue");return}
         setSimSegment(i,false,true);
     }
 
-    simBoundary=0;
-    simRunDir=1;
-    simRunEnabled=true;
-    simMovedAfterArm=false;
-
+    simBoundary=0;simRunDir=1;simRunEnabled=true;simMovedAfterArm=false;
     $("prevCueButton").disabled=true;
     $("nextCueButton").disabled=true;
-
     updateRunButtons();
-
     setStatus(`${cues[simCueIndex].name} - kör framåt`);
 };
 
@@ -512,80 +588,76 @@ $("prevCueButton").onclick=()=>{
     if(!simActive||simRunEnabled)return;
 
     if(simBoundary>0){
-        // står vid slutet av aktuell cue -> backa samma cue
         let i=simCueIndex;
         const name=cues[i].name;
-
         while(i+1<cues.length&&cues[i+1].name===name)i++;
-
         setSimSegment(i,true,true);
     }else{
-        // står vid starten -> välj föregående cue och börja vid dess slut
-        const currentName=cues[simCueIndex].name;
+        const name=cues[simCueIndex].name;
         let i=simCueIndex-1;
-
-        while(i>=0&&cues[i].name===currentName)i--;
-
-        if(i<0){
-            setStatus("Ingen föregående Cue");
-            return;
-        }
-
+        while(i>=0&&cues[i].name===name)i--;
+        if(i<0){setStatus("Ingen föregående Cue");return}
         const prevName=cues[i].name;
         while(i+1<cues.length&&cues[i+1].name===prevName)i++;
-
         setSimSegment(i,true,true);
     }
 
-    simBoundary=0;
-    simRunDir=-1;
-    simRunEnabled=true;
-    simMovedAfterArm=false;
-
+    simBoundary=0;simRunDir=-1;simRunEnabled=true;simMovedAfterArm=false;
     $("prevCueButton").disabled=true;
     $("nextCueButton").disabled=true;
-
     updateRunButtons();
-
     setStatus(`${cues[simCueIndex].name} - backa`);
 };
 
 const driveSlider=$("driveSlider"),driveValue=$("driveValue");
+const SIM_SPEED_MM_S=1000,SIM_ROT_DEG_S=180;
 
 let sliderPct=0,simActive=false,simPose=null,simCueIndex=-1;
 let simProgress=0,simLastTime=0,simFrame=0;
 let simAlign=false,simAlignTarget=0,simReverse=false;
-
-let simRotStartHeading=0;
-let simRotFinalDeg=0;
-let simRotWaitDeg=0;
-let simRotWaitDone=false;
-let simRotWaitUntil=0;
-let simRotDir=0;
-let simMovedAfterArm=false;
-let simVandStartHeading=0;
-let simVandTargetHeading=0;
-let simVandTotalDeg=0;
-let simVandTurnDir=0;
-
+let simRotStartHeading=0,simRotFinalDeg=0;
+let simVandStartHeading=0,simVandTargetHeading=0,simVandTotalDeg=0,simVandTurnDir=0;
+let simWaitUntil=0,simMovedAfterArm=false;
 let simBoundary=0,simRunEnabled=false,simRunDir=0;
+let rotCache=new WeakMap(),vandCache=new WeakMap();
 
-const SIM_SPEED_MM_S=1000,SIM_ROT_DEG_S=180;
+function segmentLinearSpeed(cue,power){
+    if(cue.speedMode==="time"){
+        const sec=Math.max(.1,cue.durationSec||1);
+        return cueLength(cue)/sec*power;
+    }
+    const pct=Math.min(100,Math.max(1,cue.speedPct??100));
+    return SIM_SPEED_MM_S*pct/100*power;
+}
+
+function segmentRotationSpeed(cue,totalDeg,power){
+    if(cue.speedMode==="time"){
+        const sec=Math.max(.1,cue.durationSec||1);
+        return Math.max(.001,totalDeg)/sec*power;
+    }
+    const pct=Math.min(100,Math.max(1,cue.speedPct??100));
+    return SIM_ROT_DEG_S*pct/100*power;
+}
+
+function segmentWait(t,cue){
+    const wait=Math.max(0,cue.waitSec||0);
+    if(wait<=0){simWaitUntil=0;return false}
+    if(simWaitUntil===0)simWaitUntil=t+wait*1000;
+    if(t<simWaitUntil){
+        const left=(simWaitUntil-t)/1000;
+        $("driveSegmentInfo").textContent=`${cueSegmentNumber(simCueIndex)}. WAIT ${left.toFixed(1)}s`;
+        return true;
+    }
+    simWaitUntil=0;
+    return false;
+}
 
 function setDriveSlider(v){
     let x=+v;
-
     if(!simActive||!simRunEnabled)x=0;
-
-    sliderPct=x;
-    driveSlider.value=x;
-    driveValue.textContent=x;
-
-    const p=50-x/2,a=Math.min(50,p),b=Math.max(50,p);
-    const c=simActive?"#20b84b":"#777";
-
-    driveSlider.style.background=
-        `linear-gradient(to bottom,#ddd 0%,#ddd ${a}%,${c} ${a}%,${c} ${b}%,#ddd ${b}%,#ddd 100%)`;
+    sliderPct=x;driveSlider.value=x;driveValue.textContent=x;
+    const p=50-x/2,a=Math.min(50,p),b=Math.max(50,p),c=simActive?"#20b84b":"#777";
+    driveSlider.style.background=`linear-gradient(to bottom,#ddd 0%,#ddd ${a}%,${c} ${a}%,${c} ${b}%,#ddd ${b}%,#ddd 100%)`;
 }
 
 function cueStartIndex(index){
@@ -595,39 +667,24 @@ function cueStartIndex(index){
     return index;
 }
 
-function segmentStartHeading(cue){
-    const pts=getCuePoints(cue);
-    if(pts.length<2)return 0;
-    return Math.atan2(pts[1].y-pts[0].y,pts[1].x-pts[0].x);
-}
-
-function startSimAtCue(index){
-    const i=cueStartIndex(index);if(i<0)return;
-    setSimSegment(i,false);
-}
-
 function simPath(cue){
-    const p=sampleCue(cue,30),out=[],cum=[0];let total=0;
-    for(let i=1;i<p.length;i++){total+=Math.hypot(p[i].x-p[i-1].x,p[i].y-p[i-1].y);cum.push(total)}
+    const p=sampleCue(cue,30),cum=[0];let total=0;
+    for(let i=1;i<p.length;i++){
+        total+=Math.hypot(p[i].x-p[i-1].x,p[i].y-p[i-1].y);
+        cum.push(total);
+    }
     return{p,cum,total};
 }
 
 function poseOnPath(cue,d){
     const s=simPath(cue);if(s.p.length<2)return null;
     d=Math.max(0,Math.min(s.total,d));
-
     let i=1;
     while(i<s.cum.length&&s.cum[i]<d)i++;
     i=Math.min(i,s.p.length-1);
-
     const a=s.p[i-1],b=s.p[i],d0=s.cum[i-1],d1=s.cum[i];
-    const t=d1>d0?(d-d0)/(d1-d0):0;
-
-    return{
-        x:a.x+(b.x-a.x)*t,
-        y:a.y+(b.y-a.y)*t,
-        heading:Math.atan2(b.y-a.y,b.x-a.x)
-    };
+    const u=d1>d0?(d-d0)/(d1-d0):0;
+    return{x:a.x+(b.x-a.x)*u,y:a.y+(b.y-a.y)*u,heading:Math.atan2(b.y-a.y,b.x-a.x)};
 }
 
 function headingBefore(index){
@@ -646,42 +703,6 @@ function normAngle(a){
     return a;
 }
 
-function vandPathHeading(index){
-    for(let i=index+1;i<cues.length;i++){
-        if(cues[i].name!==cues[index].name)break;
-
-        const c=cues[i];
-
-        if(c.type==="ROT"||c.type==="VÄND")
-            continue;
-
-        const p=poseOnPath(c,0);
-
-        if(p)
-            return p.heading;
-    }
-
-    return null;
-}
-
-function vandTargetHeading(index){
-    const newReverse=!simReverse;
-
-    for(let i=index+1;i<cues.length;i++){
-        if(cues[i].name!==cues[index].name)break;
-
-        if(cues[i].type==="ROT"||cues[i].type==="VÄND")
-            continue;
-
-        const p=poseOnPath(cues[i],0);
-
-        if(p)
-            return p.heading+(newReverse?Math.PI:0);
-    }
-
-    return null;
-}
-
 function positiveAngle(a){
     const full=Math.PI*2;
     a%=full;
@@ -690,292 +711,157 @@ function positiveAngle(a){
 }
 
 function angleInDirection(from,to,dir){
-    return dir>0
-        ? positiveAngle(to-from)
-        : positiveAngle(from-to);
+    return dir>0?positiveAngle(to-from):positiveAngle(from-to);
+}
+
+function driveHeading(pathHeading){return pathHeading+(simReverse?Math.PI:0)}
+
+function vandPathHeading(index){
+    for(let i=index+1;i<cues.length;i++){
+        if(cues[i].name!==cues[index].name)break;
+        const c=cues[i];
+        if(c.type==="ROT"||c.type==="VÄND")continue;
+        const p=poseOnPath(c,0);
+        if(p)return p.heading;
+    }
+    return null;
 }
 
 function nextMoveHeading(index){
     const i=index+1;
-
-    if(i>=cues.length)return null;
-    if(cues[i].name!==cues[index].name)return null;
-
+    if(i>=cues.length||cues[i].name!==cues[index].name)return null;
     const c=cues[i];
-
-    // Två ROT efter varandra skall köras separat.
     if(c.type==="ROT"||c.type==="VÄND")return null;
-
     const p=poseOnPath(c,0);
     return p?driveHeading(p.heading):null;
 }
 
 function makeRotPlan(index,startHeading){
-    const cue=cues[index];
-    const programmed=Math.abs(cue.rotateDeg);
-    const dir=cue.rotateDeg>=0?-1:1;
-    const target=nextMoveHeading(index);
+    const cue=cues[index],programmed=Math.abs(cue.rotateDeg);
+    const dir=cue.rotateDeg>=0?-1:1,target=nextMoveHeading(index);
+    if(target===null)return{dir,finalDeg:programmed};
 
-    // Ingen direkt körsekvens efter ROT.
-    if(target===null){
-        return{
-            dir,
-            waitDeg:programmed,
-            finalDeg:programmed
-        };
-    }
+    const firstHit=angleInDirection(startHeading,target,dir)*180/Math.PI;
+    if(programmed<360&&firstHit<=programmed+.001)return{dir,finalDeg:firstHit};
 
-    const firstHit=
-        angleInDirection(startHeading,target,dir)*180/Math.PI;
-
-    // Under ett varv får rätt körriktning avsluta ROT tidigare.
-    if(programmed<360&&firstHit<=programmed+0.001){
-        return{
-            dir,
-            waitDeg:firstHit,
-            finalDeg:firstHit
-        };
-    }
-
-    // Annars gör först hela programmerade ROT.
-    const headingAfterProgrammed=
-        startHeading+dir*programmed*Math.PI/180;
-
-    const extra=
-        angleInDirection(headingAfterProgrammed,target,dir)*180/Math.PI;
-
-    return{
-        dir,
-        waitDeg:programmed,
-        finalDeg:programmed+extra
-    };
-}
-
-function directedAngleRemaining(current,target,dir){
-    const full=Math.PI*2;
-    let d=dir>0 ? target-current : current-target;
-    d%=full;
-    if(d<0)d+=full;
-    return d;
-}
-
-function driveHeading(pathHeading){
-    return pathHeading+(simReverse?Math.PI:0);
-}
-
-
-function simSegmentHeading(cue,atEnd=false){
-    if(cue.type==="ROT")return simPose?simPose.heading:headingBefore(simCueIndex);
-    const s=simPath(cue);if(!s.total)return 0;
-    const p=poseOnPath(cue,atEnd?s.total:0);
-    return p?p.heading:0;
+    const after=startHeading+dir*programmed*Math.PI/180;
+    const extra=angleInDirection(after,target,dir)*180/Math.PI;
+    return{dir,finalDeg:programmed+extra};
 }
 
 function setSimSegment(index,atEnd=false,keepHeading=false){
     if(index<0||index>=cues.length)return false;
 
-    const cue=cues[index];
-    const oldHeading=simPose?simPose.heading:null;
-
-    simCueIndex=index;
-    selectedCue=index;
-    simAlign=false;
+    const cue=cues[index],oldHeading=simPose?simPose.heading:null;
+    simCueIndex=index;selectedCue=index;simAlign=false;simWaitUntil=0;
 
     if(cue.type==="VÄND"){
-    const n=nodes[cue.startNode];
+        const n=nodes[cue.startNode];
 
-    if(!atEnd){
-        simVandStartHeading=
-            oldHeading!==null
-                ? oldHeading
-                : headingBefore(index);
-
-        const pathHeading=vandPathHeading(index);
-
-        let target;
-
-        if(pathHeading!==null){
-            const newReverse=!simReverse;
-            target=pathHeading+(newReverse?Math.PI:0);
-        }else{
-            target=simVandStartHeading+Math.PI;
-        }
-
-        const wantedDir=cue.vandDir>=0 ? -1 : 1;
-
-        let delta;
-
-        if(wantedDir<0){
-            delta=positiveAngle(
-                simVandStartHeading-target
-            );
-        }else{
-            delta=positiveAngle(
-                target-simVandStartHeading
-            );
-        }
-
-        simVandTurnDir=wantedDir;
-        simVandTotalDeg=delta*180/Math.PI;
-
-        // Om matematiken ger 0 men vi faktiskt ska VÄND:
-        if(simVandTotalDeg<0.001)
-            simVandTotalDeg=360;
-
-        simVandTargetHeading=
-            simVandStartHeading+
-            simVandTurnDir*
-            simVandTotalDeg*Math.PI/180;
-
-        simProgress=0;
-
-        cue.simVandStartHeading=simVandStartHeading;
-        cue.simVandTargetHeading=simVandTargetHeading;
-        cue.simVandTotalDeg=simVandTotalDeg;
-        cue.simVandTurnDir=simVandTurnDir;
-
-    }else{
-        if(Number.isFinite(cue.simVandTotalDeg)){
-            simVandStartHeading=cue.simVandStartHeading;
-            simVandTargetHeading=cue.simVandTargetHeading;
-            simVandTotalDeg=cue.simVandTotalDeg;
-            simVandTurnDir=cue.simVandTurnDir;
-        }else{
-            simVandStartHeading=
-                oldHeading!==null
-                    ? oldHeading-Math.PI
-                    : headingBefore(index);
-
-            simVandTargetHeading=
-                oldHeading!==null
-                    ? oldHeading
-                    : simVandStartHeading+Math.PI;
-
-            simVandTotalDeg=180;
+        if(!atEnd){
+            simVandStartHeading=oldHeading!==null?oldHeading:headingBefore(index);
+            const pathHeading=vandPathHeading(index);
+            const target=pathHeading!==null
+                ? pathHeading+(!simReverse?Math.PI:0)
+                : simVandStartHeading+Math.PI;
             simVandTurnDir=cue.vandDir>=0?-1:1;
-        }
+            const delta=simVandTurnDir<0
+                ? positiveAngle(simVandStartHeading-target)
+                : positiveAngle(target-simVandStartHeading);
 
-        simProgress=simVandTotalDeg;
-    }
-
-    simPose={
-        x:n.x,
-        y:n.y,
-        heading:simVandStartHeading+
-                simVandTurnDir*
-                simProgress*Math.PI/180
-    };
-
-    updateCueList();
-    updateCueInfo();
-    updateSimDisplay();
-    draw();
-    return true;
-}
-    if(cue.type==="ROT"){
-    const n=nodes[cue.startNode];
-
-    if(!atEnd){
-        if(oldHeading!==null)
-            simRotStartHeading=oldHeading;
-        else
-            simRotStartHeading=headingBefore(index);
-
-        const plan=makeRotPlan(index,simRotStartHeading);
-
-        simRotWaitDeg=plan.waitDeg;
-        simRotFinalDeg=plan.finalDeg;
-
-        // Spara den verkliga planen för backning
-        cue.simRotStartHeading=simRotStartHeading;
-        cue.simRotWaitDeg=simRotWaitDeg;
-        cue.simRotFinalDeg=simRotFinalDeg;
-
-        simProgress=0;
-    }else{
-        // Backning: använd samma ROT-plan som faktiskt gällde framåt
-        if(Number.isFinite(cue.simRotStartHeading)){
-            simRotStartHeading=cue.simRotStartHeading;
-            simRotWaitDeg=cue.simRotWaitDeg;
-            simRotFinalDeg=cue.simRotFinalDeg;
+            simVandTotalDeg=delta*180/Math.PI;
+            if(simVandTotalDeg<.001)simVandTotalDeg=360;
+            simVandTargetHeading=simVandStartHeading+simVandTurnDir*simVandTotalDeg*Math.PI/180;
+            simProgress=0;
+            vandCache.set(cue,{
+                start:simVandStartHeading,target:simVandTargetHeading,
+                total:simVandTotalDeg,dir:simVandTurnDir
+            });
         }else{
-            // reserv om ROT ännu inte körts framåt
-            simRotStartHeading=headingBefore(index);
-
-            const plan=makeRotPlan(index,simRotStartHeading);
-            simRotWaitDeg=plan.waitDeg;
-            simRotFinalDeg=plan.finalDeg;
+            const p=vandCache.get(cue);
+            if(p){
+                simVandStartHeading=p.start;simVandTargetHeading=p.target;
+                simVandTotalDeg=p.total;simVandTurnDir=p.dir;
+            }else{
+                simVandStartHeading=oldHeading!==null?oldHeading-Math.PI:headingBefore(index);
+                simVandTargetHeading=oldHeading!==null?oldHeading:simVandStartHeading+Math.PI;
+                simVandTotalDeg=180;simVandTurnDir=cue.vandDir>=0?-1:1;
+            }
+            simProgress=simVandTotalDeg;
         }
 
-        simProgress=simRotFinalDeg;
-    }
+        simPose={
+            x:n.x,y:n.y,
+            heading:simVandStartHeading+simVandTurnDir*simProgress*Math.PI/180
+        };
+    }else if(cue.type==="ROT"){
+        const n=nodes[cue.startNode],rotDir=cue.rotateDeg>=0?-1:1;
 
-    simRotWaitDone=false;
-    simRotWaitUntil=0;
+        if(!atEnd){
+            simRotStartHeading=oldHeading!==null?oldHeading:headingBefore(index);
+            simRotFinalDeg=makeRotPlan(index,simRotStartHeading).finalDeg;
+            simProgress=0;
+            rotCache.set(cue,{start:simRotStartHeading,final:simRotFinalDeg});
+        }else{
+            const p=rotCache.get(cue);
+            if(p){
+                simRotStartHeading=p.start;
+                simRotFinalDeg=p.final;
+            }else{
+                const base=headingBefore(index);
+                simRotFinalDeg=makeRotPlan(index,base).finalDeg;
+                simRotStartHeading=oldHeading!==null
+                    ? oldHeading-rotDir*simRotFinalDeg*Math.PI/180
+                    : base;
+            }
+            simProgress=simRotFinalDeg;
+        }
 
-    const plan=makeRotPlan(index,simRotStartHeading);
-
-    simPose={
-        x:n.x,
-        y:n.y,
-        heading:simRotStartHeading+
-                plan.dir*simProgress*Math.PI/180
-    };
-}else{
+        simPose={
+            x:n.x,y:n.y,
+            heading:simRotStartHeading+rotDir*simProgress*Math.PI/180
+        };
+    }else{
         const s=simPath(cue);
         simProgress=atEnd?s.total:0;
-
         const p=poseOnPath(cue,simProgress);
         if(!p)return false;
 
         const wanted=driveHeading(p.heading);
-
         if(keepHeading&&oldHeading!==null){
             simPose={x:p.x,y:p.y,heading:oldHeading};
             simAlignTarget=wanted;
-            simAlign=Math.abs(normAngle(simAlignTarget-oldHeading))>0.01;
+            simAlign=Math.abs(normAngle(wanted-oldHeading))>.01;
         }else{
             simPose={x:p.x,y:p.y,heading:wanted};
         }
     }
 
-    updateCueList();
-    updateCueInfo();
-    updateSimDisplay();
-    draw();
+    updateCueList();updateCueInfo();updateSimDisplay();draw();
     return true;
 }
 
-
-
 function nextSimSegment(){
     const i=simCueIndex+1;
-
-    if(i>=cues.length)return false;
-
-    const current=cues[simCueIndex];
-    const next=cues[i];
-
-    if(next.name!==current.name)return false;
-
-    return setSimSegment(i,false,true);
+    return i<cues.length&&cues[i].name===cues[simCueIndex].name
+        ? setSimSegment(i,false,true)
+        : false;
 }
 
 function prevSimSegment(){
-    const name=cues[simCueIndex].name;
     const i=simCueIndex-1;
-    if(i>=0&&cues[i].name===name)return setSimSegment(i,true,true);
-    return false;
+    return i>=0&&cues[i].name===cues[simCueIndex].name
+        ? setSimSegment(i,true,true)
+        : false;
 }
 
 function updateSimDisplay(){
     if(!simActive||simCueIndex<0)return;
-
     const cue=cues[simCueIndex],nr=cueSegmentNumber(simCueIndex);
     $("driveCueName").textContent=cue.name;
 
     if(cue.type==="ROT"){
-        const left=Math.max(0,Math.abs(cue.rotateDeg)-simProgress);
+        const left=Math.max(0,simRotFinalDeg-simProgress);
         $("driveSegmentInfo").textContent=`${nr}. ROT ${left.toFixed(0)}°`;
     }else if(cue.type==="VÄND"){
         $("driveSegmentInfo").textContent=`${nr}. VÄND`;
@@ -986,308 +872,137 @@ function updateSimDisplay(){
 }
 
 function stopAtCueBoundary(side){
-    simBoundary=side;
-    simRunEnabled=false;
-    simRunDir=0;
-    simMovedAfterArm=false;
-
+    simBoundary=side;simRunEnabled=false;simRunDir=0;simMovedAfterArm=false;
     setDriveSlider(0);
-
-    updateBoundaryButtons();
-    updateSimDisplay();
-
-    setStatus(
-        side<0
-        ? "Cue START - välj + eller -"
-        : "Cue SLUT - välj + eller -"
-    );
+    updateBoundaryButtons();updateSimDisplay();
+    setStatus(side<0?"Cue START - välj + eller -":"Cue SLUT - välj + eller -");
 }
 
 function simLoop(t){
     if(!simActive){simFrame=0;return}
     if(!simLastTime)simLastTime=t;
-
     const dt=Math.min((t-simLastTime)/1000,.05);
     simLastTime=t;
 
     if(sliderPct!==0&&simCueIndex>=0){
-        const cue=cues[simCueIndex];
-        const dir=Math.sign(sliderPct);
-        const power=Math.abs(sliderPct)/100;
-        if(!simMovedAfterArm){
-    simMovedAfterArm=true;
-    updateRunButtons();
-}
+        const cue=cues[simCueIndex],dir=Math.sign(sliderPct),power=Math.abs(sliderPct)/100;
+
+        if(!simMovedAfterArm){simMovedAfterArm=true;updateRunButtons()}
 
         if(cue.type==="VÄND"){
-    const step=SIM_ROT_DEG_S*power*dt;
+            const step=segmentRotationSpeed(cue,simVandTotalDeg,power)*dt;
 
-    if(dir>0){
-        simProgress=Math.min(
-            simVandTotalDeg,
-            simProgress+step
-        );
+            if(dir>0){
+                simProgress=Math.min(simVandTotalDeg,simProgress+step);
+                simPose={
+                    x:nodes[cue.startNode].x,y:nodes[cue.startNode].y,
+                    heading:simVandStartHeading+simVandTurnDir*simProgress*Math.PI/180
+                };
+                $("driveSegmentInfo").textContent=
+                    `${cueSegmentNumber(simCueIndex)}. VÄND ${simProgress.toFixed(0)}°`;
 
-        simPose={
-            x:nodes[cue.startNode].x,
-            y:nodes[cue.startNode].y,
-            heading:
-                simVandStartHeading+
-                simVandTurnDir*
-                simProgress*Math.PI/180
-        };
+                if(simProgress>=simVandTotalDeg-.001){
+                    simPose.heading=simVandTargetHeading;
+                    if(segmentWait(t,cue)){draw();simFrame=requestAnimationFrame(simLoop);return}
+                    simReverse=!simReverse;
+                    if(nextSimSegment()){simLastTime=t;simFrame=requestAnimationFrame(simLoop);return}
+                    stopAtCueBoundary(1);simFrame=requestAnimationFrame(simLoop);return;
+                }
+            }else{
+                simProgress=Math.max(0,simProgress-step);
+                simPose={
+                    x:nodes[cue.startNode].x,y:nodes[cue.startNode].y,
+                    heading:simVandStartHeading+simVandTurnDir*simProgress*Math.PI/180
+                };
+                $("driveSegmentInfo").textContent=
+                    `${cueSegmentNumber(simCueIndex)}. VÄND ${simProgress.toFixed(0)}°`;
 
-        $("driveSegmentInfo").textContent=
-            `${cueSegmentNumber(simCueIndex)}. VÄND ${simProgress.toFixed(0)}°`;
-
-        if(simProgress>=simVandTotalDeg-0.001){
-            simPose.heading=simVandTargetHeading;
-
-            simReverse=!simReverse;
-
-            if(nextSimSegment()){
-                simLastTime=t;
-                simFrame=requestAnimationFrame(simLoop);
-                return;
-            }
-
-            stopAtCueBoundary(1);
-            simFrame=requestAnimationFrame(simLoop);
-            return;
-        }
-
-    }else{
-        simProgress=Math.max(
-            0,
-            simProgress-step
-        );
-
-        simPose={
-            x:nodes[cue.startNode].x,
-            y:nodes[cue.startNode].y,
-            heading:
-                simVandStartHeading+
-                simVandTurnDir*
-                simProgress*Math.PI/180
-        };
-
-        $("driveSegmentInfo").textContent=
-            `${cueSegmentNumber(simCueIndex)}. VÄND ${simProgress.toFixed(0)}°`;
-
-        if(simProgress<=0.001){
-            simPose.heading=simVandStartHeading;
-
-            simReverse=!simReverse;
-
-            if(prevSimSegment()){
-                simLastTime=t;
-                simFrame=requestAnimationFrame(simLoop);
-                return;
-            }
-
-            stopAtCueBoundary(-1);
-            simFrame=requestAnimationFrame(simLoop);
-            return;
-        }
-    }
-
-    draw();
-    simFrame=requestAnimationFrame(simLoop);
-    return;
-}
-
-        
-
-        if(cue.type==="ROT"){
-    const plan=makeRotPlan(simCueIndex,simRotStartHeading);
-    const step=SIM_ROT_DEG_S*power*dt;
-
-    // WAIT efter den programmerade ROT-punkten
-    if(!simRotWaitDone&&
-       simProgress>=simRotWaitDeg-0.001){
-
-        if(simRotWaitUntil===0){
-            simRotWaitUntil=t+(cue.waitSec||0)*1000;
-        }
-
-        if(t<simRotWaitUntil){
-            const left=(simRotWaitUntil-t)/1000;
-            $("driveSegmentInfo").textContent=
-                `${cueSegmentNumber(simCueIndex)}. WAIT ${left.toFixed(1)}s`;
-
-            draw();
-            simFrame=requestAnimationFrame(simLoop);
-            return;
-        }
-
-        simRotWaitDone=true;
-        simRotWaitUntil=0;
-    }
-
-    if(dir>0){
-        const next=Math.min(
-            simProgress+step,
-            simRotWaitDone
-                ? simRotFinalDeg
-                : simRotWaitDeg
-        );
-
-        simProgress=next;
-
-        simPose={
-            x:nodes[cue.startNode].x,
-            y:nodes[cue.startNode].y,
-            heading:simRotStartHeading+
-                    plan.dir*simProgress*Math.PI/180
-        };
-
-        // Kommit till WAIT-punkten
-        if(!simRotWaitDone&&
-           simProgress>=simRotWaitDeg-0.001){
-
-            updateSimDisplay();
-            draw();
-            updateRunButtons();
-            simFrame=requestAnimationFrame(simLoop);
-            return;
-        }
-
-        // Hela ROT + eventuell extra riktning klar
-if(simRotWaitDone&&
-   simProgress>=simRotFinalDeg-0.001){
-
-    const nextIndex=simCueIndex+1;
-
-    if(nextIndex<cues.length &&
-       cues[nextIndex].name===cue.name){
-
-        setSimSegment(nextIndex,false,true);
-
-        simLastTime=t;
-        simFrame=requestAnimationFrame(simLoop);
-        return;
-    }
-
-    stopAtCueBoundary(1);
-    simFrame=requestAnimationFrame(simLoop);
-    return;
-}
-
-    }else{
-    // Backa först mot WAIT-punkten
-    if(!simRotWaitDone&&simProgress>simRotWaitDeg){
-        simProgress=Math.max(
-            simRotWaitDeg,
-            simProgress-step
-        );
-
-        simPose={
-            x:nodes[cue.startNode].x,
-            y:nodes[cue.startNode].y,
-            heading:simRotStartHeading+
-                    plan.dir*simProgress*Math.PI/180
-        };
-
-        if(simProgress<=simRotWaitDeg+0.001){
-            simRotWaitUntil=t+(cue.waitSec||0)*1000;
-        }
-
-    }else if(!simRotWaitDone){
-        // Vänta även vid backning
-        if(t<simRotWaitUntil){
-            const left=(simRotWaitUntil-t)/1000;
-
-            $("driveSegmentInfo").textContent=
-                `${cueSegmentNumber(simCueIndex)}. WAIT ${left.toFixed(1)}s`;
-
-            draw();
-            simFrame=requestAnimationFrame(simLoop);
-            return;
-        }
-
-        simRotWaitDone=true;
-
-    }else{
-        // Efter WAIT fortsätter vi tillbaka mot ROT-start
-        simProgress=Math.max(0,simProgress-step);
-
-        simPose={
-            x:nodes[cue.startNode].x,
-            y:nodes[cue.startNode].y,
-            heading:simRotStartHeading+
-                    plan.dir*simProgress*Math.PI/180
-        };
-
-        if(simProgress<=0){
-            if(prevSimSegment()){
-                simLastTime=t;
-                simFrame=requestAnimationFrame(simLoop);
-                return;
-            }
-
-            stopAtCueBoundary(-1);
-            simFrame=requestAnimationFrame(simLoop);
-            return;
-        }
-    }
-}
-
-}else{
-            const s=simPath(cue);
-            simProgress+=dir*SIM_SPEED_MM_S*power*dt;
-
-            if(simProgress>s.total){
-                simProgress=s.total;
-
-                if(dir>0){
-                    if(nextSimSegment()){
-                        simLastTime=t;
-                        simFrame=requestAnimationFrame(simLoop);
-                        return;
-                    }
-
-                    simPose=poseOnPath(cue,s.total);
-                    if(simPose)simPose.heading=driveHeading(simPose.heading);
-
-                    draw();
-                    stopAtCueBoundary(1);
-                    simFrame=requestAnimationFrame(simLoop);
-                    return;
+                if(simProgress<=.001){
+                    simPose.heading=simVandStartHeading;
+                    if(segmentWait(t,cue)){draw();simFrame=requestAnimationFrame(simLoop);return}
+                    simReverse=!simReverse;
+                    if(prevSimSegment()){simLastTime=t;simFrame=requestAnimationFrame(simLoop);return}
+                    stopAtCueBoundary(-1);simFrame=requestAnimationFrame(simLoop);return;
                 }
             }
 
-            if(simProgress<0){
+            draw();simFrame=requestAnimationFrame(simLoop);return;
+        }
+
+        if(simAlign&&cue.type!=="ROT"){
+            const diff=normAngle(simAlignTarget-simPose.heading);
+            const step=SIM_ROT_DEG_S*Math.PI/180*power*dt;
+            if(Math.abs(diff)<=step){simPose.heading+=diff;simAlign=false}
+            else simPose.heading+=Math.sign(diff)*step;
+
+            const left=Math.abs(normAngle(simAlignTarget-simPose.heading))*180/Math.PI;
+            $("driveSegmentInfo").textContent=
+                `${cueSegmentNumber(simCueIndex)}. RIKTA ${left.toFixed(0)}°`;
+
+            draw();
+            if(simAlign){simFrame=requestAnimationFrame(simLoop);return}
+        }
+
+        if(cue.type==="ROT"){
+            const rotDir=cue.rotateDeg>=0?-1:1;
+            const step=segmentRotationSpeed(cue,simRotFinalDeg,power)*dt;
+
+            if(dir>0){
+                simProgress=Math.min(simRotFinalDeg,simProgress+step);
+                simPose={
+                    x:nodes[cue.startNode].x,y:nodes[cue.startNode].y,
+                    heading:simRotStartHeading+rotDir*simProgress*Math.PI/180
+                };
+
+                if(simProgress>=simRotFinalDeg-.001){
+                    if(segmentWait(t,cue)){updateSimDisplay();draw();simFrame=requestAnimationFrame(simLoop);return}
+                    if(nextSimSegment()){simLastTime=t;simFrame=requestAnimationFrame(simLoop);return}
+                    stopAtCueBoundary(1);simFrame=requestAnimationFrame(simLoop);return;
+                }
+            }else{
+                simProgress=Math.max(0,simProgress-step);
+                simPose={
+                    x:nodes[cue.startNode].x,y:nodes[cue.startNode].y,
+                    heading:simRotStartHeading+rotDir*simProgress*Math.PI/180
+                };
+
+                if(simProgress<=.001){
+                    if(segmentWait(t,cue)){updateSimDisplay();draw();simFrame=requestAnimationFrame(simLoop);return}
+                    if(prevSimSegment()){simLastTime=t;simFrame=requestAnimationFrame(simLoop);return}
+                    stopAtCueBoundary(-1);simFrame=requestAnimationFrame(simLoop);return;
+                }
+            }
+        }else{
+            const s=simPath(cue),speed=segmentLinearSpeed(cue,power);
+            simProgress+=dir*speed*dt;
+
+            if(simProgress>=s.total){
+                simProgress=s.total;
+                if(dir>0){
+                    if(segmentWait(t,cue)){updateSimDisplay();draw();simFrame=requestAnimationFrame(simLoop);return}
+                    if(nextSimSegment()){simLastTime=t;simFrame=requestAnimationFrame(simLoop);return}
+                    simPose=poseOnPath(cue,s.total);
+                    if(simPose)simPose.heading=driveHeading(simPose.heading);
+                    draw();stopAtCueBoundary(1);simFrame=requestAnimationFrame(simLoop);return;
+                }
+            }
+
+            if(simProgress<=0){
                 simProgress=0;
-
                 if(dir<0){
-                    if(prevSimSegment()){
-                        simLastTime=t;
-                        simFrame=requestAnimationFrame(simLoop);
-                        return;
-                    }
-
+                    if(segmentWait(t,cue)){updateSimDisplay();draw();simFrame=requestAnimationFrame(simLoop);return}
+                    if(prevSimSegment()){simLastTime=t;simFrame=requestAnimationFrame(simLoop);return}
                     simPose=poseOnPath(cue,0);
                     if(simPose)simPose.heading=driveHeading(simPose.heading);
-
-                    draw();
-                    stopAtCueBoundary(-1);
-                    simFrame=requestAnimationFrame(simLoop);
-                    return;
+                    draw();stopAtCueBoundary(-1);simFrame=requestAnimationFrame(simLoop);return;
                 }
             }
 
             const p=poseOnPath(cue,simProgress);
-            if(p){
-                simPose={
-                    x:p.x,
-                    y:p.y,
-                    heading:driveHeading(p.heading)
-                };
-            }
+            if(p)simPose={x:p.x,y:p.y,heading:driveHeading(p.heading)};
         }
 
-        updateSimDisplay();
-        draw();
+        updateSimDisplay();draw();
     }
 
     simFrame=requestAnimationFrame(simLoop);
@@ -1295,71 +1010,55 @@ if(simRotWaitDone&&
 
 function setSimActive(on){
     simActive=on;
-
     $("driveDisplay").classList.toggle("simActive",on);
     driveSlider.classList.toggle("simActive",on);
-
     setDriveSlider(0);
 
     if(on){
-        if(!cues.length){
-            simActive=false;
-            setStatus("Ingen Cue finns");
-            return;
-        }
-
-        simReverse=false;
-        simRotDir=0;
-        simRunEnabled=false;
-        simRunDir=0;
-        simBoundary=-1;
-
-        selectedCue=0;
-        simCueIndex=0;
-
+        if(!cues.length){simActive=false;setStatus("Ingen Cue finns");return}
+        simReverse=false;simRunEnabled=false;simRunDir=0;simBoundary=-1;
+        simMovedAfterArm=false;simWaitUntil=0;
+        rotCache=new WeakMap();vandCache=new WeakMap();
+        selectedCue=0;simCueIndex=0;
         setSimSegment(0,false,false);
-
         $("prevCueButton").disabled=true;
         $("nextCueButton").disabled=false;
-
+        updateRunButtons();
         simLastTime=0;
         if(!simFrame)simFrame=requestAnimationFrame(simLoop);
-
         setStatus("Cue 1 START - tryck +");
     }else{
-        simPose=null;
-        simCueIndex=-1;
-        simLastTime=0;
+    simPose=null;
+    simCueIndex=-1;
+    simLastTime=0;
+    simBoundary=0;
+    simRunEnabled=false;
+    simRunDir=0;
+    simReverse=false;
+    simWaitUntil=0;
+    simMovedAfterArm=false;
 
-        simBoundary=0;
-        simRunEnabled=false;
-        simRunDir=0;
-        simReverse=false;
-        simRotDir=0;
+    $("prevCueButton").disabled=true;
+    $("nextCueButton").disabled=true;
 
-        $("prevCueButton").disabled=true;
-        $("nextCueButton").disabled=true;
+    updateRunButtons();
 
-        if(simFrame){
-            cancelAnimationFrame(simFrame);
-            simFrame=0;
-        }
-
-        updateCueInfo();
-        draw();
-        setStatus("Torrkörning av");
+    if(simFrame){
+        cancelAnimationFrame(simFrame);
+        simFrame=0;
     }
+
+    updateCueInfo();
+    draw();
+    setStatus("Torrkörning av");
+}
 }
 
 $("driveDisplay").onclick=()=>setSimActive(!simActive);
-
 driveSlider.oninput=()=>setDriveSlider(driveSlider.value);
 driveSlider.onpointerup=()=>setDriveSlider(0);
 driveSlider.onpointercancel=()=>setDriveSlider(0);
-
 setSimActive(false);
-
-
 
 function editNodeValue(id,label){
     if(id===null||!nodes[id])return;
@@ -1393,35 +1092,86 @@ function updateNodeEdit(p,w){
     updateCueInfo();draw();
 }
 
+function editSegmentSettings(cue){
+    segmentTarget=cue;
+
+    $("segmentTitle").textContent=
+        `${cue.type}${cue.type==="ROT"
+            ? ` ${cue.rotateDeg>0?"+":""}${cue.rotateDeg}°`
+            : ""}`;
+
+    $("segModePercent").checked=(cue.speedMode||"percent")==="percent";
+    $("segModeTime").checked=cue.speedMode==="time";
+
+    $("segSpeedPct").value=cue.speedPct??100;
+    $("segDuration").value=cue.durationSec??1;
+    $("segWait").value=cue.waitSec??0;
+
+    updateSegmentDialog();
+
+    $("segmentDialog").showModal();
+}
+
+function updateSegmentDialog(){
+    const percent=$("segModePercent").checked;
+
+    $("segSpeedPct").disabled=!percent;
+    $("segDuration").disabled=percent;
+}
+
+$("segModePercent").onchange=updateSegmentDialog;
+$("segModeTime").onchange=updateSegmentDialog;
+
+$("segmentSave").onclick=()=>{
+    if(!segmentTarget)return;
+
+    segmentTarget.speedMode=
+        $("segModeTime").checked
+            ? "time"
+            : "percent";
+
+    segmentTarget.speedPct=
+        Math.min(
+            100,
+            Math.max(
+                1,
+                +$("segSpeedPct").value||100
+            )
+        );
+
+    segmentTarget.durationSec=
+        Math.max(
+            0.1,
+            +$("segDuration").value||1
+        );
+
+    segmentTarget.waitSec=
+        Math.max(
+            0,
+            +$("segWait").value||0
+        );
+
+    segmentTarget=null;
+
+    updateCueList();
+    updateCueInfo();
+    draw();
+
+    setStatus("Segmentinställningar sparade");
+};
+
 function editRotation(cue){
     rotateTarget=cue;
     rotateInsert=false;
     $("rotateDeg").value=cue.rotateDeg;
-    $("rotateWait").value=cue.waitSec||0;
     $("rotateDialog").showModal();
 }
+
 function editReverse(cue){
+    reverseTarget=cue;
     reverseInsert=false;
-
     $("reverseDialog").showModal();
-
-    $("reverseCW").onclick=()=>{
-        cue.vandDir=1;
-        updateCueList();
-        updateCueInfo();
-        draw();
-        setStatus("VÄND medsols");
-    };
-
-    $("reverseCCW").onclick=()=>{
-        cue.vandDir=-1;
-        updateCueList();
-        updateCueInfo();
-        draw();
-        setStatus("VÄND motsols");
-    };
 }
-
 
 function pairLines(text){
     const raw=text.replace(/\r/g,"").split("\n"),pairs=[];
@@ -1897,7 +1647,7 @@ canvas.addEventListener("pointerdown",e=>{
     if(!bounds)return;
     const p=getCanvasPosition(e),w=screenToWorld(p.x,p.y),cue=currentCue();
 
-    if(tool==="pan"&&cue){
+    if(tool==="pan"&&cue&&editEnabled){
     if((cue.type==="ROT"||cue.type==="VÄND")&&cue.startNode!==null){
         const n=nodes[cue.startNode],rp=worldToScreen(n.x,n.y);
 
@@ -2000,7 +1750,14 @@ canvas.addEventListener("pointerleave",()=>{
     routeHover=null;if(!dragging&&!routeDrawing&&!editMode)updatePositionInfo();draw();
 });
 
-panButton.onclick=()=>setTool("pan");
+panButton.onclick=()=>{
+    editEnabled=!editEnabled;
+    splitAfter=-1;
+    $("splitButton").classList.remove("active");
+    setTool("pan");
+    updateCueList();updateCueInfo();
+    setStatus(editEnabled?"REDIGERA aktiv":"REDIGERA av");
+};
 
 $("newCueButton").onclick=()=>{
     const last=lastSegment();
@@ -2013,8 +1770,21 @@ $("newCueButton").onclick=()=>{
 };
 
 $("splitButton").onclick=()=>{
-    const cue=currentCue();if(!cue||cue.endNode===null){setStatus("Välj ett färdigt segment först");return}
-    splitAfter=selectedCue;updateSegmentButtons();setStatus("SPLIT aktiv - välj RAK, ROT eller FÖLJ");
+    const cue=currentCue();
+
+    if(!cue||cue.endNode===null){
+        setStatus("Välj ett färdigt segment först");
+        return;
+    }
+
+    splitAfter=selectedCue;
+    updateUndoButton();
+
+    $("splitButton").classList.add("active");
+
+    updateSegmentButtons();
+
+    setStatus("SPLIT aktiv - välj RAK, ROT, VÄND eller FÖLJ");
 };
 
 straightButton.onclick=()=>{
@@ -2022,6 +1792,7 @@ straightButton.onclick=()=>{
 
     // REDIGERA: räta ut markerad kurva
     if(splitAfter<0 &&
+       editEnabled &&
        tool==="pan" &&
        current &&
        current.type==="KURVA" &&
@@ -2073,52 +1844,39 @@ $("rotateButton").onclick=()=>{
     rotateTarget=null;
 
     $("rotateDeg").value="";
-$("rotateWait").value=0;
-$("rotateDialog").showModal();
+    $("rotateDialog").showModal();
     $("rotateDeg").focus();
 };
 
-let reverseInsert=false;
-
 $("reverseButton").onclick=()=>{
     const cue=currentCue();
-
-    const canAppend=
-        cue &&
-        selectedCue===cues.length-1 &&
-        !cue.endOfCue &&
-        cue.endNode!==null;
-
+    const canAppend=cue&&selectedCue===cues.length-1&&!cue.endOfCue&&cue.endNode!==null;
     if(splitAfter<0&&!canAppend)return;
 
+    reverseTarget=null;
     reverseInsert=splitAfter>=0;
+    setTool("reverse");
     $("reverseDialog").showModal();
-};;
+};
 
-function addReverse(dir){
-    let seg=null;
+function chooseReverse(dir){
+    if(reverseTarget){
+        reverseTarget.vandDir=dir;
+        reverseTarget=null;
+        updateCueList();updateCueInfo();draw();
+        setStatus(dir>0?"VÄND medsols":"VÄND motsols");
+        return;
+    }
 
+    let seg;
     if(reverseInsert){
         seg=insertSegment("VÄND");
         if(!seg)return;
     }else{
         const last=lastSegment();
-
-        if(!last){
-            setStatus("Skapa NY CUE först");
-            return;
-        }
-
-        if(last.endOfCue){
-            setStatus("Cue är avslutad");
-            return;
-        }
-
-        if(last.endNode===null){
-            setStatus("Gör färdigt segmentet först");
-            return;
-        }
-
+        if(!last){setStatus("Skapa NY CUE först");return}
+        if(last.endOfCue){setStatus("Cue är avslutad");return}
+        if(last.endNode===null){setStatus("Gör färdigt segmentet först");return}
         seg=createEmptyCue(last.name,"VÄND");
         seg.startNode=last.endNode;
         cues.push(seg);
@@ -2126,37 +1884,23 @@ function addReverse(dir){
     }
 
     seg.vandDir=dir;
-
-    // Ingen separat nod.
     seg.endNode=seg.startNode;
-
     connectNext(seg);
-
-    updateCueList();
-    updateCueInfo();
-    draw();
-
+    reverseInsert=false;
+    updateCueList();updateCueInfo();draw();
     setTool("pan");
-
-    setStatus(
-        dir>0
-            ?"VÄND medsols tillagd"
-            :"VÄND motsols tillagd"
-    );
+    setStatus(dir>0?"VÄND medsols tillagd":"VÄND motsols tillagd");
 }
 
-$("reverseCW").onclick=()=>addReverse(1);
-$("reverseCCW").onclick=()=>addReverse(-1);
-
+$("reverseCW").onclick=()=>chooseReverse(1);
+$("reverseCCW").onclick=()=>chooseReverse(-1);
 
 $("rotateSave").onclick=()=>{
     const a=+$("rotateDeg").value;
-const wait=Math.max(0,+$("rotateWait").value||0);
     if(!Number.isFinite(a)||a===0){setStatus("Ogiltig rotation");return}
 
     if(rotateTarget){
     rotateTarget.rotateDeg=a;
-    rotateTarget.waitSec=wait;
     rotateTarget=null;
     updateCueList();updateCueInfo();draw();
     setStatus(`ROT ${a>0?"+":""}${a}°`);
@@ -2177,7 +1921,6 @@ const wait=Math.max(0,+$("rotateWait").value||0);
     }
 
     target.rotateDeg=a;
-target.waitSec=wait;
     const n=nodes[target.startNode];
     target.endNode=addNode(n.x,n.y);
     connectNext(target);
@@ -2193,6 +1936,18 @@ $("endCueButton").onclick=()=>{
 };
 
 $("undoButton").onclick=()=>{
+    const segmentMode=
+        splitAfter>=0 ||
+        tool==="straight" ||
+        tool==="follow" ||
+        tool==="rotate" ||
+        tool==="reverse";
+
+    if(!editEnabled&&!segmentMode){
+        setStatus("Aktivera REDIGERA eller skapa segment för att använda ÅNGRA");
+        return;
+    }
+
     const cue=currentCue();if(!cue||selectedCue<0)return;
     const i=selectedCue,prev=i>0?cues[i-1]:null,next=i+1<cues.length?cues[i+1]:null;
     const prevSame=prev&&prev.name===cue.name,nextSame=next&&next.name===cue.name,wasEnd=cue.endOfCue;
@@ -2210,8 +1965,11 @@ $("undoButton").onclick=()=>{
         if(i<cues.length&&cues[i].name!==prev.name)connectFrom(i,prev.endNode);
     }
 
-    selectedCue=cues.length?Math.min(i,cues.length-1):-1;splitAfter=-1;
-    updateCueList();updateCueInfo();draw();setStatus("Segment borttaget");
+    selectedCue=cues.length?Math.min(i,cues.length-1):-1;
+    splitAfter=-1;
+
+    updateCueList();updateCueInfo();updateUndoButton();draw();
+    setStatus("Segment borttaget");
 };
 
 $("vehicleButton").onclick=()=>{
@@ -2266,10 +2024,16 @@ $("saveShow").onclick=async()=>{
 
 function loadShow(show,msg){
     if(!show.drawing||!show.drawing.dxf)return false;
-    nodes=show.nodes||[];cues=show.cues||[];
+    nodes=show.nodes||[];
+    cues=(show.cues||[]).map(c=>{
+        const x={speedMode:"percent",speedPct:100,durationSec:1,waitSec:0,...c};
+        Object.keys(x).filter(k=>k.startsWith("sim")).forEach(k=>delete x[k]);
+        return x;
+    });
     if(show.vehicle)vehicle={...vehicle,...show.vehicle};
-    selectedCue=cues.length?0:-1;splitAfter=-1;cueNumber=new Set(cues.map(c=>c.name)).size;
-    updateCueList();updateCueInfo();
+    selectedCue=cues.length?0:-1;splitAfter=-1;expandedCueName=null;
+    cueNumber=new Set(cues.map(c=>c.name)).size;
+    updateCueList();updateCueInfo();updateUndoButton();
     if(loadDrawing(show.drawing.fileName,show.drawing.dxf)){setStatus(msg);return true}
     return false;
 }
@@ -2298,6 +2062,7 @@ async function loadSavedDrawing(){
 
 resetCues();draw();
 loadSavedShow().then(ok=>{if(!ok)loadSavedDrawing()});
+updateUndoButton();
 </script>
 </body>
 </html>
