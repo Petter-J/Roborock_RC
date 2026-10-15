@@ -33,6 +33,10 @@ button.active{background:#4da3ff;color:#fff}.fileButton input{display:none}
 #cuePanel{width:190px;min-width:190px;background:#303134;border:1px solid #555;padding:10px}
 #cuePanel h3{margin:0 0 10px}#cueList{display:flex;flex-direction:column;gap:5px}
 .cueItem{width:100%;text-align:left;padding:9px}.cueItem.selected{background:#4da3ff;color:#fff}
+.cueHead{display:flex;justify-content:space-between;align-items:baseline;gap:6px}
+.cueTime{font-weight:normal;font-family:monospace;font-size:13px;white-space:nowrap}
+.cueDetail{display:block;font-family:monospace;font-size:12px;opacity:.75;margin-top:3px}
+.cueDetail.late{color:#d32f2f;opacity:1;font-weight:bold}
 #drawingArea{flex:1;min-width:0}
 #drawingInfo,#cueInfo,#positionInfo,#status{margin:8px 0;font-size:15px}
 #positionInfo{font-family:monospace}
@@ -45,12 +49,18 @@ canvas.dragging{cursor:grabbing}#status{font-weight:bold}
 #drivePanel{width:120px;display:flex;flex-direction:column;align-items:center;gap:10px}
 #driveDisplay{width:115px;background:#303134;color:#fff;border:1px solid #666;border-radius:5px;padding:7px 4px;text-align:center}
 #driveDisplay.simActive{background:#16853b;border-color:#26c75a}
+#driveDisplay.empty{opacity:.45;cursor:default}
 #driveCueName{font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#driveSegmentInfo{font-family:monospace;font-size:13px;margin-top:4px;color:#ddd;white-space:nowrap}
+#driveSegmentInfo{font-family:monospace;font-size:13px;margin-top:4px;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#driveSpeedInfo{font-family:monospace;font-size:13px;margin-top:2px;color:#ddd;white-space:nowrap;min-height:16px}
+#driveSpeedInfo.limited{color:#ffb020;font-weight:bold}
+#segInfo{font-size:13px;color:#aaa;margin:4px 0 8px}
+#segInfo.error{color:#ff5252;font-weight:bold}
+input.invalid{border:2px solid #ff5252}
 #cueButtons{display:flex;gap:7px}
 #cueButtons button{width:52px;height:42px;padding:0;font-size:24px}
 #cueButtons button:disabled{opacity:.35;cursor:default}
-#undoButton:disabled{opacity:.35;cursor:default;}
+#undoButton:disabled,#deleteSegButton:disabled{opacity:.35;cursor:default;}
 #cueButtons button.runAllowed{background:#20b84b;color:#fff;opacity:1;}
 #cueButtons button.runSelected{background:#20b84b;color:#fff;opacity:1;}
 
@@ -85,6 +95,7 @@ dialog::backdrop{background:#0008}
 .cfg label{display:flex;justify-content:space-between;align-items:center;gap:18px}
 .cfg input{width:145px;padding:7px;font-size:16px}
 .cfg .buttons{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}
+.cfg .buttons button:disabled{opacity:.35;cursor:default}
 .xy{display:flex;gap:12px}.xy label{display:block}.xy input{display:block;width:135px;margin-top:4px}
 @media(max-width:700px){#workspace{flex-direction:column}#cuePanel{width:100%}#cueList{flex-direction:row;flex-wrap:wrap}.cueItem{width:auto}}
 </style>
@@ -112,7 +123,8 @@ dialog::backdrop{background:#0008}
 <button id="followButton">FÖLJ</button>
 <button id="splitButton">SPLIT SEG</button>
 <button id="endCueButton">SLUT CUE</button>
-<button id="undoButton">ÅNGRA</button>
+<button id="deleteSegButton">TA BORT SEG</button>
+<button id="undoButton" title="Återställ till läget när REDIGERA slogs på">ÅNGRA</button>
 </div>
 
 <div class="toolbar">
@@ -130,8 +142,9 @@ dialog::backdrop{background:#0008}
 <div id="canvasContainer"><canvas id="canvas" width="1200" height="800"></canvas></div>
 <div id="drivePanel">
 <button id="driveDisplay" type="button">
-<div id="driveCueName">Ingen Cue</div>
+<div id="driveCueName">▶ STARTA</div>
 <div id="driveSegmentInfo">--.</div>
+<div id="driveSpeedInfo"></div>
 </button>
 <div id="cueButtons"><button id="prevCueButton" disabled>−</button><button id="nextCueButton" disabled>+</button></div>
 <input id="driveSlider" type="range" min="-100" max="100" value="0">
@@ -209,22 +222,16 @@ Grader
 <h3 id="segmentTitle">SEGMENT</h3>
 
 <label>
-<input id="segModePercent" type="radio" name="segSpeedMode" value="percent">
 Hastighet %
+<input id="segSpeedPct" type="number" min="0.1" max="100" step="0.1">
 </label>
 
 <label>
-<input id="segSpeedPct" type="number" min="1" max="100" step="1">
-</label>
-
-<label>
-<input id="segModeTime" type="radio" name="segSpeedMode" value="time">
 Tid sek
-</label>
-
-<label>
 <input id="segDuration" type="number" min="0.1" step="0.1">
 </label>
+
+<div id="segInfo"></div>
 
 <label>
 Vänta efter
@@ -305,7 +312,7 @@ function updateSegmentButtons(){
 function resetCues(){
     nodes=[];cues=[];selectedCue=-1;cueNumber=0;activeCueName="";
     splitAfter=-1;expandedCueName=null;
-    updateCueList();updateCueInfo();updateUndoButton();
+    updateCueList();updateCueInfo();updateEditButtons();
 }
 
 function connectFrom(index,nodeId){
@@ -353,21 +360,64 @@ function insertSegment(type){
     const old=cues[splitAfter],seg=createEmptyCue(old.name,type);seg.startNode=old.endNode;
     if(old.endOfCue){old.endOfCue=false;seg.endOfCue=true}
     cues.splice(splitAfter+1,0,seg);selectedCue=splitAfter+1;splitAfter=-1;
-    updateUndoButton();
+    updateEditButtons();
 
     $("splitButton").classList.remove("active");
     updateCueList();updateCueInfo();draw();return seg;
 }
 
-function updateUndoButton(){
-    const segmentMode=
-        splitAfter>=0 ||
-        tool==="straight" ||
-        tool==="follow" ||
-        tool==="rotate" ||
-        tool==="reverse";
+function isSegmentMode(){
+    return splitAfter>=0||tool==="straight"||tool==="follow"||tool==="rotate"||tool==="reverse";
+}
 
-    $("undoButton").disabled=!editEnabled&&!segmentMode;
+function updateEditButtons(){
+    $("deleteSegButton").disabled=!editEnabled&&!isSegmentMode();
+    $("undoButton").disabled=!editEnabled||!editSnapshot;
+}
+
+// --------------------------------------------------
+// ÅNGRA: läget när REDIGERA slogs på
+// --------------------------------------------------
+
+let editSnapshot=null;
+
+function takeEditSnapshot(){
+    editSnapshot=JSON.stringify({nodes,cues,vehicle});
+}
+
+function restoreEditSnapshot(){
+    if(!editSnapshot)return;
+    const s=JSON.parse(editSnapshot);
+    if(simActive)setSimActive(false);
+    nodes=s.nodes;cues=s.cues;vehicle=s.vehicle;
+    rotCache=new WeakMap();vandCache=new WeakMap();
+    selectedCue=Math.min(selectedCue,cues.length-1);
+    if(expandedCueName!==null&&!cues.some(c=>c.name===expandedCueName))expandedCueName=null;
+    splitAfter=-1;
+    $("splitButton").classList.remove("active");
+    setTool("pan");
+    updateCueList();updateCueInfo();draw();
+}
+
+// --------------------------------------------------
+// OSPARADE ÄNDRINGAR
+// Jämför mot läget vid senaste laddning/sparning av show.
+// --------------------------------------------------
+
+let savedSignature="";
+
+function showSignature(){
+    return JSON.stringify({file:currentFileName,nodes,cues,vehicle});
+}
+
+function markSaved(){savedSignature=showSignature()}
+
+function isDirty(){
+    return cues.length>0&&showSignature()!==savedSignature;
+}
+
+function confirmDiscard(action){
+    return !isDirty()||confirm(`Du har osparade ändringar i showen.\n${action} ändå? Ändringarna går förlorade.`);
 }
 
 function setTool(t){
@@ -384,14 +434,36 @@ function setTool(t){
         t==="reverse"?"VÄND vald":
         editEnabled?"REDIGERA aktiv":"REDIGERA av"
     );
-    updateUndoButton();draw();
+    updateEditButtons();draw();
+}
+
+// Cue-namn måste vara unika: lista, totaltid och omdöpning går på namnet
+function cueNameExists(name){return cues.some(c=>c.name===name)}
+
+function freeCueName(){
+    let n=cueNumber+1;
+    while(cueNameExists(`Cue ${n}`))n++;
+    return `Cue ${n}`;
+}
+
+// Fråga efter namn tills det är unikt. null = avbrutet.
+function askCueName(text,def,old=null){
+    let value=def;
+    for(;;){
+        const name=prompt(text,value);
+        if(name===null)return null;
+        const n=name.trim()||def;
+        if(n===old||!cueNameExists(n))return n;
+        alert(`Det finns redan en Cue som heter "${n}".\nVälj ett annat namn.`);
+        value=n;
+    }
 }
 
 function renameCue(index){
     if(index<0||index>=cues.length)return;
-    const old=cues[index].name,name=prompt("Nytt Cue-namn:",old);
-    if(name===null)return;
-    const n=name.trim();if(!n||n===old)return;
+    const old=cues[index].name,n=askCueName("Nytt Cue-namn:",old,old);
+    if(n===null||n===old)return;
+    if(expandedCueName===old)expandedCueName=n;
 
     let a=index,b=index;
     while(a>0&&cues[a-1].name===old)a--;
@@ -416,7 +488,12 @@ function updateCueList(){
             const h=document.createElement("div");
             const open=expandedCueName===cue.name;
 
-            h.textContent=(open?"▼ ":"▶ ")+cue.name;
+            const title=document.createElement("span"),total=document.createElement("span");
+            title.textContent=(open?"▼ ":"▶ ")+cue.name;
+            total.className="cueTime";
+            total.textContent=formatTime(cueTotalTime(cue.name));
+            h.className="cueHead";
+            h.append(title,total);
             h.style.cursor="pointer";
 
             Object.assign(h.style,{
@@ -468,6 +545,17 @@ function updateCueList(){
                 :"")+
             (cue.endOfCue?" ■":"");
 
+        // % · tid · väntan
+        const detail=document.createElement("span");
+        const sec=segmentPlannedTime(cue),wait=Math.max(0,cue.waitSec||0);
+        const late=cue.speedMode==="time"&&sec>(cue.durationSec||0)+.01;
+        detail.className="cueDetail"+(late?" late":"");
+        detail.textContent=
+            `${roundTo(segmentPct(cue),1)}% · ${formatTime(sec)}${late?" ⚠":""}`+
+            (wait>0?` · W ${formatTime(wait)}`:"");
+        if(late)detail.title=`Inställd tid ${cue.durationSec} s går inte att köra`;
+        b.appendChild(detail);
+
         b.onclick=()=>{
     const alreadySelected=selectedCue===i;
 
@@ -504,12 +592,20 @@ function cueSegmentNumber(index){
 }
 
 function updateDriveDisplay(){
-    const cue=currentCue();
-    if(!cue){
-        $("driveCueName").textContent="Ingen Cue";
-        $("driveSegmentInfo").textContent="--.";
+    $("driveSpeedInfo").textContent="";
+
+    // Ej startad: visa vilken Cue testet startar på
+    // Normalläge: första Cue. REDIGERA: vald Cue.
+    if(!simActive){
+        const start=editEnabled&&selectedCue>=0?cueStartIndex(selectedCue):0;
+        $("driveCueName").textContent="▶ STARTA";
+        $("driveSegmentInfo").textContent=cues.length?cues[start].name:"--";
+        $("driveDisplay").classList.toggle("empty",!cues.length);
         return;
     }
+
+    const cue=currentCue();
+    if(!cue)return;
 
     const nr=cueSegmentNumber(selectedCue);
 $("driveCueName").textContent=cue.name;
@@ -546,21 +642,40 @@ function updateRunButtons(){
 }
 
 function updateBoundaryButtons(){
-    const prev=$("prevCueButton"),next=$("nextCueButton");
+    const prev=$("prevCueButton");
+    const next=$("nextCueButton");
+
     if(!simActive||simCueIndex<0)return;
+
     const name=cues[simCueIndex].name;
 
     if(simBoundary<0){
-        let i=simCueIndex-1;
-        while(i>=0&&cues[i].name===name)i--;
+        // START: framåt genom aktuell Cue är tillåtet
         next.disabled=false;
-        prev.disabled=i<0;
+
+        // I single-cue test får vi inte gå till föregående Cue
+        if(simSingleCue){
+            prev.disabled=true;
+        }else{
+            let i=simCueIndex-1;
+            while(i>=0&&cues[i].name===name)i--;
+            prev.disabled=i<0;
+        }
+
     }else if(simBoundary>0){
-        let i=simCueIndex+1;
-        while(i<cues.length&&cues[i].name===name)i++;
+        // SLUT: aktuell Cue får backas
         prev.disabled=false;
-        next.disabled=i>=cues.length;
+
+        // I single-cue test får vi inte gå till nästa Cue
+        if(simSingleCue){
+            next.disabled=true;
+        }else{
+            let i=simCueIndex+1;
+            while(i<cues.length&&cues[i].name===name)i++;
+            next.disabled=i>=cues.length;
+        }
     }
+
     updateRunButtons();
 }
 
@@ -570,16 +685,32 @@ $("nextCueButton").onclick=()=>{
     if(simBoundary<0){
         setSimSegment(cueStartIndex(simCueIndex),false,true);
     }else{
-        const name=cues[simCueIndex].name;
+        if(simSingleCue){
+            setStatus("Test av vald Cue klart");
+            return;
+        }
+
+        const currentName=cues[simCueIndex].name;
         let i=simCueIndex+1;
-        while(i<cues.length&&cues[i].name===name)i++;
-        if(i>=cues.length){setStatus("Ingen nästa Cue");return}
+
+        while(i<cues.length&&cues[i].name===currentName)i++;
+
+        if(i>=cues.length){
+            setStatus("Ingen nästa Cue");
+            return;
+        }
+
         setSimSegment(i,false,true);
     }
 
-    simBoundary=0;simRunDir=1;simRunEnabled=true;simMovedAfterArm=false;
+    simBoundary=0;
+    simRunDir=1;
+    simRunEnabled=true;
+    simMovedAfterArm=false;
+
     $("prevCueButton").disabled=true;
     $("nextCueButton").disabled=true;
+
     updateRunButtons();
     setStatus(`${cues[simCueIndex].name} - kör framåt`);
 };
@@ -590,65 +721,213 @@ $("prevCueButton").onclick=()=>{
     if(simBoundary>0){
         let i=simCueIndex;
         const name=cues[i].name;
+
         while(i+1<cues.length&&cues[i+1].name===name)i++;
+
         setSimSegment(i,true,true);
     }else{
+        if(simSingleCue){
+            setStatus("Test av vald Cue - står vid START");
+            return;
+        }
+
         const name=cues[simCueIndex].name;
         let i=simCueIndex-1;
+
         while(i>=0&&cues[i].name===name)i--;
-        if(i<0){setStatus("Ingen föregående Cue");return}
+
+        if(i<0){
+            setStatus("Ingen föregående Cue");
+            return;
+        }
+
         const prevName=cues[i].name;
+
         while(i+1<cues.length&&cues[i+1].name===prevName)i++;
+
         setSimSegment(i,true,true);
     }
 
-    simBoundary=0;simRunDir=-1;simRunEnabled=true;simMovedAfterArm=false;
+    simBoundary=0;
+    simRunDir=-1;
+    simRunEnabled=true;
+    simMovedAfterArm=false;
+
     $("prevCueButton").disabled=true;
     $("nextCueButton").disabled=true;
+
     updateRunButtons();
     setStatus(`${cues[simCueIndex].name} - backa`);
 };
 
 const driveSlider=$("driveSlider"),driveValue=$("driveValue");
-const SIM_SPEED_MM_S=1000,SIM_ROT_DEG_S=180;
+const SIM_SPEED_MM_S=1000;
+const SIM_NORMAL_MAX=0.80;
+const SIM_WHEEL_MAX_MM_S=SIM_SPEED_MM_S/SIM_NORMAL_MAX;
+const SIM_ROT_DEG_S=180;
 
 let sliderPct=0,simActive=false,simPose=null,simCueIndex=-1;
 let simProgress=0,simLastTime=0,simFrame=0;
 let simAlign=false,simAlignTarget=0,simReverse=false;
 let simRotStartHeading=0,simRotFinalDeg=0;
 let simVandStartHeading=0,simVandTargetHeading=0,simVandTotalDeg=0,simVandTurnDir=0;
-let simWaitUntil=0,simMovedAfterArm=false;
+let simWaitUntil=0,simWaitDone=false,simMovedAfterArm=false;
 let simBoundary=0,simRunEnabled=false,simRunDir=0;
 let rotCache=new WeakMap(),vandCache=new WeakMap();
+let simCurrentPct=0;
+let simSingleCue=false;
+const SIM_RAMP_PCT_S=100;
+
+// --------------------------------------------------
+// FARTGRÄNS I KURVOR
+// Ytterhjulet får inte gå över maxfart och sidoaccelerationen
+// begränsas. Profilen rampas så att vagnen bromsar före kurvan
+// och accelererar ut ur den.
+// --------------------------------------------------
+
+const SIM_LAT_ACC_MM_S2=1500,SIM_LONG_ACC_MM_S2=1000,SIM_MIN_CURVE_SPEED_MM_S=30;
+let simSpeedMmS=0,simSpeedLimited=false;
+
+function curveSpeedLimit(r){
+    if(!Number.isFinite(r))return Infinity;
+    const half=vehicle.trackWidthMm/2;
+    return Math.max(SIM_MIN_CURVE_SPEED_MM_S,Math.min(
+        SIM_WHEEL_MAX_MM_S*r/(r+half),
+        Math.sqrt(SIM_LAT_ACC_MM_S2*r)
+    ));
+}
+
+function speedProfile(s){
+    const n=s.p.length,v=new Array(n).fill(Infinity);
+    for(let i=1;i<n-1;i++)v[i]=curveSpeedLimit(pointRadius(s.p[i-1],s.p[i],s.p[i+1]));
+    for(let i=1;i<n;i++)v[i]=Math.min(v[i],Math.sqrt(v[i-1]**2+2*SIM_LONG_ACC_MM_S2*(s.cum[i]-s.cum[i-1])));
+    for(let i=n-2;i>=0;i--)v[i]=Math.min(v[i],Math.sqrt(v[i+1]**2+2*SIM_LONG_ACC_MM_S2*(s.cum[i+1]-s.cum[i])));
+    return v;
+}
+
+function profileSpeedAt(s,d){
+    const v=speedProfile(s);
+    let i=1;
+    while(i<s.cum.length-1&&s.cum[i]<d)i++;
+    const d0=s.cum[i-1],d1=s.cum[i],a=v[i-1],b=v[i];
+    if(!Number.isFinite(a)||!Number.isFinite(b))return Math.min(a,b);
+    return a+(b-a)*(d1>d0?Math.max(0,Math.min(1,(d-d0)/(d1-d0))):0);
+}
+
+// --------------------------------------------------
+// HASTIGHET % <-> TID
+// Tiden räknas med fartprofilen, dvs inklusive inbromsning
+// i kurvor. Det fält som skrevs senast (speedMode) styr.
+// --------------------------------------------------
+
+function isRotationCue(cue){return cue.type==="ROT"||cue.type==="VÄND"}
+
+function segmentDegrees(cue){
+    if(cue.type==="VÄND")return vandCache.get(cue)?.total??180;
+    const index=cues.indexOf(cue);
+    return index<0?Math.abs(cue.rotateDeg):makeRotPlan(index,headingBefore(index)).finalDeg;
+}
+
+function linearTimeAtPct(s,prof,pct){
+    const base=SIM_SPEED_MM_S*Math.min(100,Math.max(.1,pct))/100;
+    let t=0;
+    for(let i=1;i<s.p.length;i++){
+        const a=prof[i-1],b=prof[i];
+        const limit=Number.isFinite(a)&&Number.isFinite(b)?(a+b)/2:Math.min(a,b);
+        t+=(s.cum[i]-s.cum[i-1])/Math.min(base,limit);
+    }
+    return t;
+}
+
+function segmentTimeAtPct(cue,pct){
+    if(isRotationCue(cue))return segmentDegrees(cue)/(SIM_ROT_DEG_S*Math.min(100,Math.max(.1,pct))/100);
+    const s=simPath(cue);
+    return linearTimeAtPct(s,speedProfile(s),pct);
+}
+
+function segmentMinTime(cue){return segmentTimeAtPct(cue,100)}
+
+// Procent som ger önskad tid. Går tiden inte att nå blir det 100 %.
+function segmentPctForTime(cue,sec){
+    if(isRotationCue(cue))return Math.min(100,Math.max(.1,segmentDegrees(cue)/sec/SIM_ROT_DEG_S*100));
+    const s=simPath(cue),prof=speedProfile(s);
+    if(sec<=linearTimeAtPct(s,prof,100))return 100;
+    let lo=.1,hi=100;
+    for(let n=0;n<40;n++){
+        const mid=(lo+hi)/2;
+        if(linearTimeAtPct(s,prof,mid)>sec)lo=mid;else hi=mid;
+    }
+    return hi;
+}
+
+function segmentPct(cue){
+    if(cue.speedMode==="time")return segmentPctForTime(cue,Math.max(.1,cue.durationSec||1));
+    return Math.min(100,Math.max(.1,cue.speedPct??100));
+}
+
+// Körtid för segmentet med inställd % eller tid (utan väntan)
+function segmentPlannedTime(cue){
+    if(cue.startNode===null)return 0;
+    if(!isRotationCue(cue)&&cue.endNode===null)return 0;
+    return segmentTimeAtPct(cue,segmentPct(cue));
+}
+
+// Total tid för en Cue: alla segment + väntan
+function cueTotalTime(name){
+    let t=0;
+    for(const c of cues)if(c.name===name)t+=segmentPlannedTime(c)+Math.max(0,c.waitSec||0);
+    return t;
+}
+
+function formatTime(sec){
+    if(sec<60)return `${sec.toFixed(1)}s`;
+    const m=Math.floor(sec/60),s=sec-m*60;
+    return `${m}:${s.toFixed(1).padStart(4,"0")}`;
+}
 
 function segmentLinearSpeed(cue,power){
-    if(cue.speedMode==="time"){
-        const sec=Math.max(.1,cue.durationSec||1);
-        return cueLength(cue)/sec*power;
-    }
-    const pct=Math.min(100,Math.max(1,cue.speedPct??100));
-    return SIM_SPEED_MM_S*pct/100*power;
+    return SIM_SPEED_MM_S*segmentPct(cue)/100*power;
 }
 
 function segmentRotationSpeed(cue,totalDeg,power){
     if(cue.speedMode==="time"){
         const sec=Math.max(.1,cue.durationSec||1);
-        return Math.max(.001,totalDeg)/sec*power;
+        return Math.min(SIM_ROT_DEG_S,Math.max(.001,totalDeg)/sec)*power;
     }
-    const pct=Math.min(100,Math.max(1,cue.speedPct??100));
+    const pct=Math.min(100,Math.max(.1,cue.speedPct??100));
     return SIM_ROT_DEG_S*pct/100*power;
 }
 
 function segmentWait(t,cue){
     const wait=Math.max(0,cue.waitSec||0);
-    if(wait<=0){simWaitUntil=0;return false}
-    if(simWaitUntil===0)simWaitUntil=t+wait*1000;
+
+    if(wait<=0){
+        simWaitUntil=0;
+        simWaitDone=false;
+        return false;
+    }
+
+    if(simWaitDone){
+        simWaitDone=false;
+        return false;
+    }
+
+    if(simWaitUntil===0){
+        simWaitUntil=t+wait*1000;
+        simCurrentPct=0;
+    }
+
     if(t<simWaitUntil){
         const left=(simWaitUntil-t)/1000;
-        $("driveSegmentInfo").textContent=`${cueSegmentNumber(simCueIndex)}. WAIT ${left.toFixed(1)}s`;
+
+        $("driveSegmentInfo").textContent=
+            `${cueSegmentNumber(simCueIndex)}. WAIT ${left.toFixed(1)}s`;
+
         return true;
     }
+
     simWaitUntil=0;
+    simWaitDone=true;
     return false;
 }
 
@@ -868,11 +1147,16 @@ function updateSimDisplay(){
     }else{
         const left=Math.max(0,simPath(cue).total-simProgress);
         $("driveSegmentInfo").textContent=`${nr}. ${cue.type} ${(left/1000).toFixed(2)}m`;
+        const moving=simCurrentPct!==0;
+        $("driveSpeedInfo").textContent=moving?`${(simSpeedMmS/1000).toFixed(2)} m/s${simSpeedLimited?" ▼":""}`:"";
+        $("driveSpeedInfo").classList.toggle("limited",moving&&simSpeedLimited);
+        return;
     }
+    $("driveSpeedInfo").textContent="";
 }
 
 function stopAtCueBoundary(side){
-    simBoundary=side;simRunEnabled=false;simRunDir=0;simMovedAfterArm=false;
+    simBoundary=side;simRunEnabled=false;simRunDir=0;simMovedAfterArm=false;simCurrentPct=0;
     setDriveSlider(0);
     updateBoundaryButtons();updateSimDisplay();
     setStatus(side<0?"Cue START - välj + eller -":"Cue SLUT - välj + eller -");
@@ -883,9 +1167,31 @@ function simLoop(t){
     if(!simLastTime)simLastTime=t;
     const dt=Math.min((t-simLastTime)/1000,.05);
     simLastTime=t;
+if(simWaitUntil!==0&&simCueIndex>=0){
+    const cue=cues[simCueIndex];
 
-    if(sliderPct!==0&&simCueIndex>=0){
-        const cue=cues[simCueIndex],dir=Math.sign(sliderPct),power=Math.abs(sliderPct)/100;
+    if(segmentWait(t,cue)){
+        draw();
+        simFrame=requestAnimationFrame(simLoop);
+        return;
+    }
+}
+
+const targetPct=simRunEnabled ? sliderPct : 0;
+    
+const rampStep=SIM_RAMP_PCT_S*dt;
+
+if(Math.abs(targetPct-simCurrentPct)<=rampStep)
+    simCurrentPct=targetPct;
+else
+    simCurrentPct+=Math.sign(targetPct-simCurrentPct)*rampStep;
+
+if(Math.abs(simCurrentPct)<0.001)simCurrentPct=0;
+
+if(simCurrentPct!==0&&simCueIndex>=0){
+    const cue=cues[simCueIndex];
+    const dir=Math.sign(simCurrentPct);
+    const power=Math.abs(simCurrentPct)/100;
 
         if(!simMovedAfterArm){simMovedAfterArm=true;updateRunButtons()}
 
@@ -973,7 +1279,11 @@ function simLoop(t){
                 }
             }
         }else{
-            const s=simPath(cue),speed=segmentLinearSpeed(cue,power);
+            const s=simPath(cue),base=segmentLinearSpeed(cue,power);
+            const limit=profileSpeedAt(s,simProgress);
+            const speed=Math.min(base,limit);
+            simSpeedMmS=speed;
+            simSpeedLimited=limit<base;
             simProgress+=dir*speed*dt;
 
             if(simProgress>=s.total){
@@ -1009,6 +1319,7 @@ function simLoop(t){
 }
 
 function setSimActive(on){
+    if(on&&!cues.length){setStatus("Ingen Cue finns");return}
     simActive=on;
     $("driveDisplay").classList.toggle("simActive",on);
     driveSlider.classList.toggle("simActive",on);
@@ -1017,16 +1328,22 @@ function setSimActive(on){
     if(on){
         if(!cues.length){simActive=false;setStatus("Ingen Cue finns");return}
         simReverse=false;simRunEnabled=false;simRunDir=0;simBoundary=-1;
-        simMovedAfterArm=false;simWaitUntil=0;
+        simMovedAfterArm=false;simWaitUntil=0;simCurrentPct=0;
         rotCache=new WeakMap();vandCache=new WeakMap();
-        selectedCue=0;simCueIndex=0;
-        setSimSegment(0,false,false);
+        simSingleCue=editEnabled;
+        if(simSingleCue && selectedCue>=0){
+    simCueIndex=cueStartIndex(selectedCue);
+    selectedCue=simCueIndex;
+}else{
+    selectedCue=0;simCueIndex=0;}
+
+setSimSegment(simCueIndex,false,false);
         $("prevCueButton").disabled=true;
         $("nextCueButton").disabled=false;
         updateRunButtons();
         simLastTime=0;
         if(!simFrame)simFrame=requestAnimationFrame(simLoop);
-        setStatus("Cue 1 START - tryck +");
+        setStatus(`${cues[simCueIndex].name} START - tryck +`);
     }else{
     simPose=null;
     simCueIndex=-1;
@@ -1037,6 +1354,7 @@ function setSimActive(on){
     simReverse=false;
     simWaitUntil=0;
     simMovedAfterArm=false;
+    simCurrentPct=0;    
 
     $("prevCueButton").disabled=true;
     $("nextCueButton").disabled=true;
@@ -1069,12 +1387,27 @@ function editNodeValue(id,label){
 
 $("nodeSave").onclick=()=>{
     if(dialogNodeId<0||!nodes[dialogNodeId])return;
-    const x=+$("nodeX").value,y=+$("nodeY").value;
-    if(!Number.isFinite(x)||!Number.isFinite(y)){setStatus("Ogiltigt värde");return}
-    nodes[dialogNodeId].x=Math.round(x);nodes[dialogNodeId].y=Math.round(y);
+
+    const x=+$("nodeX").value;
+    const y=+$("nodeY").value;
+
+    if(!Number.isFinite(x)||!Number.isFinite(y)){
+        setStatus("Ogiltigt värde");
+        return;
+    }
+
+    nodes[dialogNodeId].x=Math.round(x);
+    nodes[dialogNodeId].y=Math.round(y);
+
     const cue=currentCue();
     if(cue&&dialogNodeId===cue.endNode)connectNext(cue);
-    updateCueInfo();draw();setStatus(`${dialogNodeLabel} uppdaterad`);
+
+    syncNodeCurves(dialogNodeId);
+
+    updateCueInfo();
+    updateCueList();
+    draw();
+    setStatus(`${dialogNodeLabel} uppdaterad${radiusWarning(cues.filter(c=>c.startNode===dialogNodeId||c.endNode===dialogNodeId))}`);
 };
 
 function beginNodeEdit(id,label,p){
@@ -1089,6 +1422,9 @@ function updateNodeEdit(p,w){
     nodes[editNodeId].x=Math.round(w.x);nodes[editNodeId].y=Math.round(w.y);
     const cue=currentCue();
     if(cue&&editNodeId===cue.endNode)connectNext(cue);
+    for(const c of cues){
+        if(c.startNode===editNodeId||c.endNode===editNodeId)syncCurveControls(c);
+    }
     updateCueInfo();draw();
 }
 
@@ -1100,11 +1436,16 @@ function editSegmentSettings(cue){
             ? ` ${cue.rotateDeg>0?"+":""}${cue.rotateDeg}°`
             : ""}`;
 
-    $("segModePercent").checked=(cue.speedMode||"percent")==="percent";
-    $("segModeTime").checked=cue.speedMode==="time";
+    segMaster=cue.speedMode==="time"?"time":"percent";
 
-    $("segSpeedPct").value=cue.speedPct??100;
-    $("segDuration").value=cue.durationSec??1;
+    if(segMaster==="time"){
+        $("segDuration").value=roundTo(Math.max(cue.durationSec??1,segmentMinTime(cue)),2);
+        $("segSpeedPct").value=roundTo(segmentPctForTime(cue,+$("segDuration").value),1);
+    }else{
+        const pct=Math.min(100,Math.max(.1,cue.speedPct??100));
+        $("segSpeedPct").value=roundTo(pct,1);
+        $("segDuration").value=ceilTo(segmentTimeAtPct(cue,pct),2);
+    }
     $("segWait").value=cue.waitSec??0;
 
     updateSegmentDialog();
@@ -1112,38 +1453,81 @@ function editSegmentSettings(cue){
     $("segmentDialog").showModal();
 }
 
-function updateSegmentDialog(){
-    const percent=$("segModePercent").checked;
+// Fältet som skrevs senast styr ("percent" eller "time")
+let segMaster="percent";
 
-    $("segSpeedPct").disabled=!percent;
-    $("segDuration").disabled=percent;
+function roundTo(x,d){const f=10**d;return Math.round(x*f)/f}
+function ceilTo(x,d){const f=10**d;return Math.ceil(x*f-1e-6)/f}
+
+// Snabbaste tid avrundad uppåt så att den alltid går att köra
+function segMinTimeRounded(cue){return ceilTo(segmentMinTime(cue),2)}
+
+function segPctValid(){
+    const pct=+$("segSpeedPct").value;
+    return $("segSpeedPct").value!==""&&pct>=.1&&pct<=100;
 }
 
-$("segModePercent").onchange=updateSegmentDialog;
-$("segModeTime").onchange=updateSegmentDialog;
+function segTimeValid(){
+    const t=+$("segDuration").value;
+    return $("segDuration").value!==""&&t>=segMinTimeRounded(segmentTarget);
+}
 
-$("segmentSave").onclick=()=>{
+function updateSegmentDialog(){
+    const cue=segmentTarget;if(!cue)return;
+    const minT=segMinTimeRounded(cue);
+    const pctOK=segPctValid(),timeOK=segTimeValid();
+    const info=$("segInfo");
+
+    $("segSpeedPct").classList.toggle("invalid",!pctOK);
+    $("segDuration").classList.toggle("invalid",!timeOK);
+    $("segmentSave").disabled=!pctOK||!timeOK;
+
+    if(!timeOK){
+        info.textContent=`För kort tid - snabbast ${minT.toFixed(2)} s`;
+    }else if(!pctOK){
+        info.textContent="Hastighet måste vara 0.1-100 %";
+    }else{
+        info.textContent=`Snabbast ${minT.toFixed(2)} s · styr: ${segMaster==="time"?"tid":"%"}`;
+    }
+    info.classList.toggle("error",!pctOK||!timeOK);
+}
+
+$("segSpeedPct").oninput=()=>{
+    segMaster="percent";
+    if(segPctValid())$("segDuration").value=ceilTo(segmentTimeAtPct(segmentTarget,+$("segSpeedPct").value),2);
+    updateSegmentDialog();
+};
+
+$("segDuration").oninput=()=>{
+    segMaster="time";
+    if(segTimeValid())$("segSpeedPct").value=roundTo(segmentPctForTime(segmentTarget,+$("segDuration").value),1);
+    updateSegmentDialog();
+};
+
+// När fältet lämnas: för kort tid höjs till snabbaste möjliga
+$("segDuration").onchange=()=>{
+    if(segTimeValid()||$("segDuration").value==="")return;
+    $("segDuration").value=segMinTimeRounded(segmentTarget);
+    $("segDuration").oninput();
+};
+
+$("segSpeedPct").onchange=()=>{
+    if(segPctValid()||$("segSpeedPct").value==="")return;
+    $("segSpeedPct").value=Math.min(100,Math.max(.1,+$("segSpeedPct").value));
+    $("segSpeedPct").oninput();
+};
+
+$("segmentSave").onclick=e=>{
     if(!segmentTarget)return;
+    if(!segPctValid()||!segTimeValid()){e.preventDefault();return}
 
-    segmentTarget.speedMode=
-        $("segModeTime").checked
-            ? "time"
-            : "percent";
+    segmentTarget.speedMode=segMaster;
 
     segmentTarget.speedPct=
-        Math.min(
-            100,
-            Math.max(
-                1,
-                +$("segSpeedPct").value||100
-            )
-        );
+        Math.min(100,Math.max(.1,+$("segSpeedPct").value));
 
     segmentTarget.durationSec=
-        Math.max(
-            0.1,
-            +$("segDuration").value||1
-        );
+        Math.max(segMinTimeRounded(segmentTarget),+$("segDuration").value);
 
     segmentTarget.waitSec=
         Math.max(
@@ -1179,65 +1563,206 @@ function pairLines(text){
     return pairs;
 }
 
+// --------------------------------------------------
+// DXF
+// Stöd: LINE, CIRCLE, ARC, LWPOLYLINE/POLYLINE (med bågar),
+// ELLIPSE, SPLINE och INSERT (block). Allt annat räknas
+// i dxfSkipped och visas i ritningsinfon.
+// --------------------------------------------------
+
+let dxfSkipped={};
+
+const DXF_ARC_STEP=Math.PI/36;
+
+// Läs en entitet: {type,codes,vertices} och index efter den
+function readDxfEntity(pairs,i){
+    const ent={type:pairs[i].value,codes:[],vertices:[]};i++;
+    while(i<pairs.length&&pairs[i].code!==0)ent.codes.push(pairs[i++]);
+    if(ent.type==="POLYLINE"){
+        while(i<pairs.length&&pairs[i].code===0&&pairs[i].value==="VERTEX"){
+            const v=[];i++;
+            while(i<pairs.length&&pairs[i].code!==0)v.push(pairs[i++]);
+            ent.vertices.push(v);
+        }
+        if(i<pairs.length&&pairs[i].value==="SEQEND"){i++;while(i<pairs.length&&pairs[i].code!==0)i++}
+    }
+    return{ent,next:i};
+}
+
+function dxfNum(codes,code,def=0){
+    const c=codes.find(q=>q.code===code);
+    if(!c)return def;
+    const v=+c.value;
+    return Number.isFinite(v)?v:def;
+}
+
+function dxfStr(codes,code,def=""){
+    const c=codes.find(q=>q.code===code);
+    return c?c.value:def;
+}
+
+function arcPoints(cx,cy,r,a0,a1,out){
+    if(a1<a0)a1+=Math.PI*2;
+    const n=Math.max(2,Math.ceil((a1-a0)/DXF_ARC_STEP));
+    for(let k=0;k<=n;k++){const a=a0+(a1-a0)*k/n;out.push({x:cx+r*Math.cos(a),y:cy+r*Math.sin(a)})}
+    return out;
+}
+
+// Båge mellan två polylinjepunkter (bulge = tan(vinkel/4))
+function bulgePoints(p1,p2,b,out){
+    const dx=p2.x-p1.x,dy=p2.y-p1.y,d=Math.hypot(dx,dy);
+    if(Math.abs(b)<1e-9||d<1e-9){out.push({x:p2.x,y:p2.y});return}
+    const theta=4*Math.atan(b),k=d*(1-b*b)/(4*b);
+    const cx=(p1.x+p2.x)/2-dy/d*k,cy=(p1.y+p2.y)/2+dx/d*k;
+    const r=Math.hypot(p1.x-cx,p1.y-cy),a0=Math.atan2(p1.y-cy,p1.x-cx);
+    const n=Math.max(2,Math.ceil(Math.abs(theta)/DXF_ARC_STEP));
+    for(let s=1;s<=n;s++){const a=a0+theta*s/n;out.push({x:cx+r*Math.cos(a),y:cy+r*Math.sin(a)})}
+}
+
+function polyPoints(verts,closed){
+    const out=[];
+    if(!verts.length)return out;
+    out.push({x:verts[0].x,y:verts[0].y});
+    const n=closed?verts.length:verts.length-1;
+    for(let i=0;i<n;i++)bulgePoints(verts[i],verts[(i+1)%verts.length],verts[i].b,out);
+    return out;
+}
+
+function splinePoints(codes){
+    const deg=dxfNum(codes,71,3),knots=[],ctrl=[],fit=[];
+    let last=null;
+    for(const q of codes){
+        if(q.code===40)knots.push(+q.value);
+        if(q.code===10){last={x:+q.value,y:0};ctrl.push(last)}
+        if(q.code===20&&last)last.y=+q.value;
+        if(q.code===11){last={x:+q.value,y:0};fit.push(last)}
+        if(q.code===21&&last)last.y=+q.value;
+    }
+    const n=ctrl.length;
+    // Utan giltiga knutar: rita genom fit-punkter eller kontrollpunkter
+    if(n<=deg||knots.length!==n+deg+1)return fit.length>1?fit:ctrl;
+
+    const out=[],u0=knots[deg],u1=knots[n],steps=n*8;
+    for(let s=0;s<=steps;s++){
+        const u=u0+(u1-u0)*s/steps;
+        let k=deg;
+        while(k<n-1&&u>=knots[k+1])k++;
+        const d=[];
+        for(let j=0;j<=deg;j++)d.push({...ctrl[j+k-deg]});
+        for(let r=1;r<=deg;r++){
+            for(let j=deg;j>=r;j--){
+                const den=knots[j+1+k-r]-knots[j+k-deg];
+                const a=den?(u-knots[j+k-deg])/den:0;
+                d[j]={x:(1-a)*d[j-1].x+a*d[j].x,y:(1-a)*d[j-1].y+a*d[j].y};
+            }
+        }
+        out.push(d[deg]);
+    }
+    return out;
+}
+
+function ellipsePoints(codes){
+    const cx=dxfNum(codes,10),cy=dxfNum(codes,20),mx=dxfNum(codes,11),my=dxfNum(codes,21);
+    const ratio=dxfNum(codes,40,1);
+    let t0=dxfNum(codes,41,0),t1=dxfNum(codes,42,Math.PI*2);
+    if(t1<=t0)t1+=Math.PI*2;
+    const n=Math.max(8,Math.ceil((t1-t0)/DXF_ARC_STEP)),out=[];
+    for(let k=0;k<=n;k++){
+        const t=t0+(t1-t0)*k/n,c=Math.cos(t),s=Math.sin(t);
+        out.push({x:cx+mx*c-ratio*my*s,y:cy+my*c+ratio*mx*s});
+    }
+    return out;
+}
+
+// Entitet -> ritbara objekt (LINE/CIRCLE/ARC/POLYLINE)
+function dxfToPrims(ent,blocks,depth){
+    const c=ent.codes;
+    if(dxfNum(c,67,0)===1)return[];   // pappersrymd
+    const flip=dxfNum(c,230,1)<0;     // speglad (normal Z=-1): x byter tecken
+    const fx=x=>flip?-x:x;
+    switch(ent.type){
+        case"LINE":
+            return[{type:"LINE",x1:dxfNum(c,10),y1:dxfNum(c,20),x2:dxfNum(c,11),y2:dxfNum(c,21)}];
+        case"CIRCLE":
+            return[{type:"CIRCLE",x:fx(dxfNum(c,10)),y:dxfNum(c,20),r:dxfNum(c,40)}];
+        case"ARC":{
+            const a0=dxfNum(c,50),a1=dxfNum(c,51);
+            return[{type:"ARC",x:fx(dxfNum(c,10)),y:dxfNum(c,20),r:dxfNum(c,40),start:flip?180-a1:a0,end:flip?180-a0:a1}];
+        }
+        case"LWPOLYLINE":{
+            const verts=[];let cur=null;
+            for(const q of c){
+                if(q.code===10){cur={x:fx(+q.value),y:0,b:0};verts.push(cur)}
+                if(q.code===20&&cur)cur.y=+q.value;
+                if(q.code===42&&cur)cur.b=flip?-q.value:+q.value;
+            }
+            const pts=polyPoints(verts,(dxfNum(c,70)&1)!==0);
+            return pts.length>1?[{type:"POLYLINE",points:pts,closed:false}]:[];
+        }
+        case"POLYLINE":{
+            const verts=ent.vertices.map(v=>({x:dxfNum(v,10),y:dxfNum(v,20),b:dxfNum(v,42)}));
+            const pts=polyPoints(verts,(dxfNum(c,70)&1)!==0);
+            return pts.length>1?[{type:"POLYLINE",points:pts,closed:false}]:[];
+        }
+        case"ELLIPSE":
+            return[{type:"POLYLINE",points:ellipsePoints(c),closed:false}];
+        case"SPLINE":{
+            const pts=splinePoints(c);
+            return pts.length>1?[{type:"POLYLINE",points:pts,closed:false}]:[];
+        }
+        case"INSERT":{
+            const block=blocks[dxfStr(c,2)];
+            if(!block||depth>8)return null;
+            const sx=dxfNum(c,41,1),sy=dxfNum(c,42,sx),rot=dxfNum(c,50)*Math.PI/180;
+            const ix=dxfNum(c,10),iy=dxfNum(c,20),cos=Math.cos(rot),sin=Math.sin(rot);
+            const tf=p=>{
+                const x=(p.x-block.baseX)*sx,y=(p.y-block.baseY)*sy;
+                return{x:ix+x*cos-y*sin,y:iy+x*sin+y*cos};
+            };
+            const out=[];
+            for(const be of block.entities){
+                const prims=dxfToPrims(be,blocks,depth+1);
+                if(prims===null){dxfSkipped[be.type]=(dxfSkipped[be.type]||0)+1;continue}
+                for(const p of prims)out.push({type:"POLYLINE",points:primPoints(p).map(tf),closed:false});
+            }
+            return out;
+        }
+    }
+    return null;
+}
+
+function primPoints(p){
+    if(p.type==="LINE")return[{x:p.x1,y:p.y1},{x:p.x2,y:p.y2}];
+    if(p.type==="POLYLINE")return p.points;
+    if(p.type==="CIRCLE")return arcPoints(p.x,p.y,p.r,0,Math.PI*2,[]);
+    return arcPoints(p.x,p.y,p.r,p.start*Math.PI/180,p.end*Math.PI/180,[]);
+}
+
 function parseDXF(text){
-    const pairs=pairLines(text),out=[];let i=0,section="";
+    const pairs=pairLines(text),out=[],blocks={};
+    let i=0,section="",block=null;
+    dxfSkipped={};
+
     while(i<pairs.length){
         const p=pairs[i];
         if(p.code===0&&p.value==="SECTION"){if(i+1<pairs.length&&pairs[i+1].code===2)section=pairs[i+1].value;i+=2;continue}
         if(p.code===0&&p.value==="ENDSEC"){section="";i++;continue}
-        if(section!=="ENTITIES"||p.code!==0){i++;continue}
-        const type=p.value;
+        if(p.code!==0||(section!=="ENTITIES"&&section!=="BLOCKS")){i++;continue}
 
-        if(type==="LINE"){
-            const e={type:"LINE",x1:0,y1:0,x2:0,y2:0};i++;
-            while(i<pairs.length&&pairs[i].code!==0){
-                const q=pairs[i];if(q.code===10)e.x1=+q.value;if(q.code===20)e.y1=+q.value;
-                if(q.code===11)e.x2=+q.value;if(q.code===21)e.y2=+q.value;i++;
-            }out.push(e);continue;
+        const{ent,next}=readDxfEntity(pairs,i);i=next;
+
+        if(section==="BLOCKS"){
+            if(ent.type==="BLOCK"){
+                block={entities:[],baseX:dxfNum(ent.codes,10),baseY:dxfNum(ent.codes,20)};
+                blocks[dxfStr(ent.codes,2)]=block;
+            }else if(ent.type==="ENDBLK")block=null;
+            else if(block)block.entities.push(ent);
+            continue;
         }
 
-        if(type==="CIRCLE"){
-            const e={type:"CIRCLE",x:0,y:0,r:0};i++;
-            while(i<pairs.length&&pairs[i].code!==0){
-                const q=pairs[i];if(q.code===10)e.x=+q.value;if(q.code===20)e.y=+q.value;if(q.code===40)e.r=+q.value;i++;
-            }out.push(e);continue;
-        }
-
-        if(type==="ARC"){
-            const e={type:"ARC",x:0,y:0,r:0,start:0,end:0};i++;
-            while(i<pairs.length&&pairs[i].code!==0){
-                const q=pairs[i];if(q.code===10)e.x=+q.value;if(q.code===20)e.y=+q.value;if(q.code===40)e.r=+q.value;
-                if(q.code===50)e.start=+q.value;if(q.code===51)e.end=+q.value;i++;
-            }out.push(e);continue;
-        }
-
-        if(type==="LWPOLYLINE"){
-            const e={type:"POLYLINE",points:[],closed:false};let cur=null;i++;
-            while(i<pairs.length&&pairs[i].code!==0){
-                const q=pairs[i];if(q.code===70)e.closed=(+q.value&1)!==0;
-                if(q.code===10){cur={x:+q.value,y:0};e.points.push(cur)}
-                if(q.code===20&&cur)cur.y=+q.value;i++;
-            }
-            if(e.points.length>1)out.push(e);continue;
-        }
-
-        if(type==="POLYLINE"){
-            const e={type:"POLYLINE",points:[],closed:false};i++;
-            while(i<pairs.length){
-                if(pairs[i].code===70)e.closed=(+pairs[i].value&1)!==0;
-                if(pairs[i].code===0&&pairs[i].value==="VERTEX"){
-                    const pt={x:0,y:0};i++;
-                    while(i<pairs.length&&pairs[i].code!==0){
-                        if(pairs[i].code===10)pt.x=+pairs[i].value;
-                        if(pairs[i].code===20)pt.y=+pairs[i].value;i++;
-                    }e.points.push(pt);continue;
-                }
-                if(pairs[i].code===0&&pairs[i].value==="SEQEND"){i++;break}
-                i++;
-            }
-            if(e.points.length>1)out.push(e);continue;
-        }
-        i++;
+        const prims=dxfToPrims(ent,blocks,0);
+        if(prims===null)dxfSkipped[ent.type]=(dxfSkipped[ent.type]||0)+1;
+        else out.push(...prims);
     }
     return out;
 }
@@ -1351,6 +1876,27 @@ function drawCue(cue,index){
         ctx.beginPath();ctx.moveTo(p.x,p.y);
         for(let i=1;i<s.length;i++){p=worldToScreen(s[i].x,s[i].y);ctx.lineTo(p.x,p.y)}
         ctx.stroke();
+
+        // Orange: vagnen måste sakta in från full fart
+        // Rött: radie < halva spårvidden, innerhjulet backar
+        const limit=vehicle.trackWidthMm/2;
+        const orange=new Path2D(),red=new Path2D(),rings=[];
+        for(let i=1;i<s.length-1;i++){
+            const r=pointRadius(s[i-1],s[i],s[i+1]);
+            const tight=r<limit;
+            if(!tight&&curveSpeedLimit(r)>=SIM_SPEED_MM_S)continue;
+            const a=worldToScreen(s[i-1].x,s[i-1].y),b=worldToScreen(s[i+1].x,s[i+1].y);
+            const path=tight?red:orange;
+            path.moveTo(a.x,a.y);path.lineTo(b.x,b.y);
+            if(!tight)continue;
+            const c=worldToScreen(s[i].x,s[i].y);
+            if(!rings.some(q=>Math.hypot(q.x-c.x,q.y-c.y)<20))rings.push(c);
+        }
+        ctx.lineWidth=index===selectedCue?6:4;
+        ctx.strokeStyle="#ff9800";ctx.stroke(orange);
+        ctx.strokeStyle="#e32626";ctx.stroke(red);
+        ctx.lineWidth=2;
+        for(const q of rings){ctx.beginPath();ctx.arc(q.x,q.y,10,0,Math.PI*2);ctx.stroke()}
     }
     if(index!==selectedCue)return;
     for(const q of cue.path){
@@ -1535,6 +2081,20 @@ function draw(){
 
 function addNode(x,y){nodes.push({id:nodes.length,x:Math.round(x),y:Math.round(y)});return nodes.length-1}
 
+// Ta bort noder som ingen Cue använder och numrera om
+function compactNodes(){
+    const map=new Map(),next=[];
+    const use=id=>{
+        if(id===null||!nodes[id])return null;
+        if(!map.has(id)){map.set(id,next.length);next.push({...nodes[id],id:next.length})}
+        return map.get(id);
+    };
+    for(const c of cues){c.startNode=use(c.startNode);c.endNode=use(c.endNode)}
+    const removed=nodes.length-next.length;
+    nodes=next;
+    return removed;
+}
+
 function addFollowPoint(cue,x,y){
     const p={x:Math.round(x),y:Math.round(y)},last=cue.path.length?cue.path[cue.path.length-1]:nodes[cue.startNode];
     if(Math.hypot(p.x-last.x,p.y-last.y)<FOLLOW_STEP_MM)return;cue.path.push(p);
@@ -1553,6 +2113,95 @@ function simplifyRDP(points,eps){
     if(max<=eps)return[points[0],points[points.length-1]];
     const a=simplifyRDP(points.slice(0,index+1),eps),b=simplifyRDP(points.slice(index),eps);
     return a.slice(0,-1).concat(b);
+}
+
+function maxCurveControls(cue){
+    return Math.max(0,Math.round(cueLength(cue)/500)-1);
+}
+
+function addCurveControls(cue){
+    if(!cue||(cue.type!=="KURVA"&&cue.type!=="FÖLJ")||cue.startNode===null||cue.endNode===null)return false;
+    const count=maxCurveControls(cue);
+    let added=false;
+    while(cue.path.length<count){
+        const pts=sampleCue(cue,24),lengths=Array(cue.path.length+1).fill(0);
+        for(let i=1;i<pts.length;i++)lengths[pts[i-1].segment]+=Math.hypot(pts[i].x-pts[i-1].x,pts[i].y-pts[i-1].y);
+        const segment=lengths.indexOf(Math.max(...lengths)),target=lengths[segment]/2;
+        let distance=0;
+        for(let i=1;i<pts.length;i++){
+            if(pts[i-1].segment!==segment)continue;
+            const step=Math.hypot(pts[i].x-pts[i-1].x,pts[i].y-pts[i-1].y);
+            if(step>0&&distance+step>=target){
+                const t=(target-distance)/step;
+                cue.path.splice(segment,0,{
+                    x:Math.round(pts[i-1].x+(pts[i].x-pts[i-1].x)*t),
+                    y:Math.round(pts[i-1].y+(pts[i].y-pts[i-1].y)*t)
+                });
+                added=true;
+                break;
+            }
+            distance+=step;
+        }
+        if(cue.path.length===lengths.length-1)break;
+    }
+    return added;
+}
+
+// Ta bort dragpunkter när kurvan blir kortare.
+// Hysteres så att punkter inte läggs till/tas bort om vartannat vid gränsen.
+// Punkten som tas bort är den som påverkar formen minst. "keep" tas aldrig bort.
+// Minst en punkt behålls så att kurvan alltid går att dra i.
+const CURVE_CONTROL_HYST_MM=150;
+
+function removeCurveControls(cue,keep=null){
+    if(!cue||(cue.type!=="KURVA"&&cue.type!=="FÖLJ")||cue.startNode===null||cue.endNode===null)return false;
+    let removed=false;
+    while(cue.path.length>1){
+        const pts=getCuePoints(cue);
+        let best=-1,bestDist=Infinity;
+        for(let i=0;i<cue.path.length;i++){
+            if(cue.path[i]===keep)continue;
+            const d=perpendicularDistance(pts[i+1],pts[i],pts[i+2]);
+            if(d<bestDist){bestDist=d;best=i}
+        }
+        if(best<0)break;
+        // Bedöm längden utan punkten, annars kan punkten själv hålla kvar längden
+        const path=cue.path;
+        cue.path=path.filter((_,i)=>i!==best);
+        if(path.length<=Math.max(1,Math.round((cueLength(cue)+CURVE_CONTROL_HYST_MM)/500)-1)){
+            cue.path=path;
+            break;
+        }
+        removed=true;
+    }
+    return removed;
+}
+
+function syncCurveControls(cue,keep=null){
+    const added=addCurveControls(cue);
+    const removed=removeCurveControls(cue,keep);
+    return added||removed;
+}
+
+// Efter nodflytt: räkna om antalet punkter när kurvan är färdigdragen.
+function syncNodeCurves(id){
+    for(const c of cues){
+        if((c.startNode===id||c.endNode===id))syncCurveControls(c);
+    }
+}
+
+function spaceFollowControls(cue){
+    const pts=sampleCue(cue,24),dist=[0];
+    for(let i=1;i<pts.length;i++)dist.push(dist[i-1]+Math.hypot(pts[i].x-pts[i-1].x,pts[i].y-pts[i-1].y));
+    const length=dist[dist.length-1],count=Math.max(0,Math.round(length/500)-1),path=[];
+    let j=1;
+    for(let i=1;i<=count;i++){
+        const target=length*i/(count+1);
+        while(j<pts.length-1&&dist[j]<target)j++;
+        const t=(target-dist[j-1])/(dist[j]-dist[j-1]);
+        path.push({x:Math.round(pts[j-1].x+(pts[j].x-pts[j-1].x)*t),y:Math.round(pts[j-1].y+(pts[j].y-pts[j-1].y)*t)});
+    }
+    cue.path=path;
 }
 
 function smoothFollowCue(cue){
@@ -1600,20 +2249,137 @@ function hitCurve(s,cue){
     return best;
 }
 
-function beginControlEdit(i){editMode="control";editPathIndex=i;canvas.style.cursor="grabbing"}
+// Radie i punkt b genom a,b,c (Infinity om rakt)
+function pointRadius(a,b,c){
+    const ab=Math.hypot(b.x-a.x,b.y-a.y);
+    const bc=Math.hypot(c.x-b.x,c.y-b.y);
+    const ca=Math.hypot(a.x-c.x,a.y-c.y);
+
+    const cross=Math.abs(
+        (b.x-a.x)*(c.y-a.y)-
+        (b.y-a.y)*(c.x-a.x)
+    );
+
+    return cross<0.001?Infinity:ab*bc*ca/(2*cross);
+}
+
+function minCurveRadius(cue){
+    const p=sampleCue(cue,24);
+    let minR=Infinity;
+    for(let i=1;i<p.length-1;i++)minR=Math.min(minR,pointRadius(p[i-1],p[i],p[i+1]));
+    return minR;
+}
+
+// Varningstext om någon kurva är snävare än halva spårvidden (innerhjulet backar)
+function radiusWarning(list=cues){
+    const limit=vehicle.trackWidthMm/2;
+    let minR=Infinity;
+    for(const c of list){
+        if((c.type==="KURVA"||c.type==="FÖLJ")&&c.startNode!==null&&c.endNode!==null)minR=Math.min(minR,minCurveRadius(c));
+    }
+    return minR<limit?` - VARNING: kurvradie ${Math.round(minR)} mm < ${Math.round(limit)} mm (rött)`:"";
+}
+
+function enforceMinCurveRadius(cue){
+    if(cue.startNode===null||cue.endNode===null)return;
+
+    const minR=vehicle.trackWidthMm/2;
+
+    for(let pass=0;pass<20;pass++){
+        if(minCurveRadius(cue)>=minR)return;
+
+        const pts=[
+            {...nodes[cue.startNode]},
+            ...cue.path.map(p=>({...p})),
+            {...nodes[cue.endNode]}
+        ];
+
+        if(pts.length<3)return;
+
+        const next=[pts[0]];
+
+        for(let i=1;i<pts.length-1;i++){
+            next.push({
+                x:pts[i-1].x*.25+pts[i].x*.5+pts[i+1].x*.25,
+                y:pts[i-1].y*.25+pts[i].y*.5+pts[i+1].y*.25
+            });
+        }
+
+        next.push(pts[pts.length-1]);
+
+        cue.path=next.slice(1,-1).map(p=>({
+            x:Math.round(p.x),
+            y:Math.round(p.y)
+        }));
+    }
+}
+
+function beginControlEdit(i){
+    const cue=currentCue();
+    editMode="control";
+    editPathIndex=i;
+    canvas.style.cursor="grabbing";
+}
 
 function updateControlEdit(w){
-    const cue=currentCue();if(!cue||editPathIndex<0||editPathIndex>=cue.path.length)return;
-    cue.path[editPathIndex]={x:Math.round(w.x),y:Math.round(w.y)};updateCueInfo();draw();
+    const cue=currentCue();
+    if(!cue||editPathIndex<0||editPathIndex>=cue.path.length)return;
+
+    // Ingen radiespärr: för snäva partier ritas röda i stället
+    const activePoint={
+        x:Math.round(w.x),
+        y:Math.round(w.y)
+    };
+
+    cue.path[editPathIndex]=activePoint;
+
+    if(syncCurveControls(cue,activePoint))
+        editPathIndex=cue.path.indexOf(activePoint);
+
+    updateCueInfo();
+    draw();
 }
 
 function beginCurveEdit(hit){
-    const cue=currentCue();cue.path.splice(hit.segment,0,{x:Math.round(hit.x),y:Math.round(hit.y)});
-    editMode="control";editPathIndex=hit.segment;if(cue.type==="RAK")cue.type="KURVA";
-    updateCueList();updateCueInfo();canvas.style.cursor="grabbing";
+    const cue=currentCue();
+    if(cue.type==="RAK"||cue.type==="KURVA"||cue.type==="FÖLJ"){
+        const max=Math.max(1,maxCurveControls(cue));
+        if(cue.path.length>=max){
+            if(!cue.path.length)return;
+            let nearest=0;
+            for(let i=1;i<cue.path.length;i++){
+                if(Math.hypot(cue.path[i].x-hit.x,cue.path[i].y-hit.y)<Math.hypot(cue.path[nearest].x-hit.x,cue.path[nearest].y-hit.y))nearest=i;
+            }
+            beginControlEdit(nearest);
+            return;
+        }
+    }
+
+    cue.path.splice(hit.segment,0,{
+        x:Math.round(hit.x),
+        y:Math.round(hit.y)
+    });
+
+    editMode="control";
+    editPathIndex=hit.segment;
+
+    if(cue.type==="RAK")cue.type="KURVA";
+
+    updateCueList();
+    updateCueInfo();
+    canvas.style.cursor="grabbing";
 }
 
-function endEdit(){editMode=null;editPathIndex=-1;canvas.style.cursor="crosshair";updateCueInfo();updateCueList();draw()}
+function endEdit(){
+    editMode=null;
+    editPathIndex=-1;
+    canvas.style.cursor="crosshair";
+    updateCueInfo();
+    updateCueList();
+    draw();
+    const cue=currentCue();
+    if(cue)setStatus(`Kontrollpunkt flyttad${radiusWarning([cue])}`);
+}
 
 function zoomAt(x,y,f){
     if(!bounds)return;
@@ -1636,7 +2402,10 @@ function updatePositionInfo(x=null,y=null){
 
 function showDrawingInfo(){
     const w=bounds.maxX-bounds.minX,h=bounds.maxY-bounds.minY;
-    drawingInfo.textContent=`${currentFileName} | ${entities.length} objekt | ${(w/1000).toFixed(2)} × ${(h/1000).toFixed(2)} m`;
+    const skipped=Object.entries(dxfSkipped);
+    const total=skipped.reduce((s,[,n])=>s+n,0);
+    drawingInfo.textContent=`${currentFileName} | ${entities.length} objekt | ${(w/1000).toFixed(2)} × ${(h/1000).toFixed(2)} m`+
+        (total?` | ${total} visas ej (${skipped.map(([t,n])=>`${t} ${n}`).join(", ")})`:"");
 }
 
 canvas.addEventListener("wheel",e=>{
@@ -1666,7 +2435,7 @@ canvas.addEventListener("pointerdown",e=>{
         if(c){beginControlEdit(c.index);canvas.setPointerCapture(e.pointerId);setStatus("Flyttar kontrollpunkt");return}
 
         const h=hitCurve(p,cue);
-        if(h){beginCurveEdit(h);canvas.setPointerCapture(e.pointerId);setStatus("Ny kontrollpunkt skapad");return}
+        if(h){beginCurveEdit(h);canvas.setPointerCapture(e.pointerId);setStatus(editMode==="control"?"Flyttar kontrollpunkt":"Inga interna kontrollpunkter för denna banlängd");return}
     }
 
     if(tool==="straight"){
@@ -1718,9 +2487,16 @@ function stopPointer(e){
         editMode=null;editNodeId=-1;editNodeLabel="";editNodeMoved=false;canvas.style.cursor="crosshair";
         if(!moved)editNodeValue(id,label);
         else{
-            const cue=currentCue();if(cue&&id===cue.endNode)connectNext(cue);
-            updateCueInfo();updateCueList();draw();setStatus(`${label}-punkt flyttad`);
-        }
+    const cue=currentCue();
+    if(cue&&id===cue.endNode)connectNext(cue);
+
+    syncNodeCurves(id);
+
+    updateCueInfo();
+    updateCueList();
+    draw();
+    setStatus(`${label}-punkt flyttad${radiusWarning(cues.filter(c=>c.startNode===id||c.endNode===id))}`);
+}
         if(e&&canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);
         return;
     }
@@ -1729,7 +2505,7 @@ function stopPointer(e){
     else if(routeDrawing){
         routeDrawing=false;
         const p=getCanvasPosition(e),w=screenToWorld(p.x,p.y),cue=currentCue();
-        cue.endNode=addNode(w.x,w.y);smoothFollowCue(cue);connectNext(cue);
+        cue.endNode=addNode(w.x,w.y);smoothFollowCue(cue);spaceFollowControls(cue);enforceMinCurveRadius(cue);connectNext(cue);
         updateCueInfo();updateCueList();draw();setStatus("Segment klart - välj RAK, ROT, FÖLJ eller SLUT CUE");
     }
 
@@ -1752,6 +2528,13 @@ canvas.addEventListener("pointerleave",()=>{
 
 panButton.onclick=()=>{
     editEnabled=!editEnabled;
+    if(editEnabled)takeEditSnapshot();
+    else{
+        // Ur REDIGERA: tillbaka till Cue 1
+        editSnapshot=null;
+        if(simActive)setSimActive(false);
+        if(cues.length){selectedCue=0;expandedCueName=cues[0].name}
+    }
     splitAfter=-1;
     $("splitButton").classList.remove("active");
     setTool("pan");
@@ -1762,8 +2545,8 @@ panButton.onclick=()=>{
 $("newCueButton").onclick=()=>{
     const last=lastSegment();
     if(last&&!last.endOfCue){setStatus("Avsluta nuvarande Cue med SLUT CUE först");return}
-    const name=prompt("Namn på Cue:",`Cue ${cueNumber+1}`);if(name===null)return;
-    cueNumber++;activeCueName=name.trim()||`Cue ${cueNumber}`;
+    const name=askCueName("Namn på Cue:",freeCueName());if(name===null)return;
+    cueNumber++;activeCueName=name;
     const cue=createEmptyCue(activeCueName);if(last&&last.endNode!==null)cue.startNode=last.endNode;
     cues.push(cue);selectedCue=cues.length-1;splitAfter=-1;
     updateCueList();updateCueInfo();draw();setTool("pan");setStatus(`Ny Cue: ${activeCueName} - välj RAK, ROT eller FÖLJ`);
@@ -1778,7 +2561,7 @@ $("splitButton").onclick=()=>{
     }
 
     splitAfter=selectedCue;
-    updateUndoButton();
+    updateEditButtons();
 
     $("splitButton").classList.add("active");
 
@@ -1936,15 +2719,16 @@ $("endCueButton").onclick=()=>{
 };
 
 $("undoButton").onclick=()=>{
-    const segmentMode=
-        splitAfter>=0 ||
-        tool==="straight" ||
-        tool==="follow" ||
-        tool==="rotate" ||
-        tool==="reverse";
+    if(!editEnabled||!editSnapshot)return;
+    if(JSON.stringify({nodes,cues,vehicle})===editSnapshot){setStatus("Inga ändringar att ångra");return}
+    if(!confirm("Ångra alla ändringar sedan REDIGERA slogs på?"))return;
+    restoreEditSnapshot();
+    setStatus("Ändringar ångrade - tillbaka till läget när REDIGERA slogs på");
+};
 
-    if(!editEnabled&&!segmentMode){
-        setStatus("Aktivera REDIGERA eller skapa segment för att använda ÅNGRA");
+$("deleteSegButton").onclick=()=>{
+    if(!editEnabled&&!isSegmentMode()){
+        setStatus("Aktivera REDIGERA eller skapa segment för att använda TA BORT SEG");
         return;
     }
 
@@ -1967,8 +2751,9 @@ $("undoButton").onclick=()=>{
 
     selectedCue=cues.length?Math.min(i,cues.length-1):-1;
     splitAfter=-1;
+    if(!simActive)compactNodes();
 
-    updateCueList();updateCueInfo();updateUndoButton();draw();
+    updateCueList();updateCueInfo();updateEditButtons();draw();
     setStatus("Segment borttaget");
 };
 
@@ -1985,19 +2770,33 @@ $("vehicleSave").onclick=()=>{
     vehicle.lengthMm=Math.max(0,+$("vLength").value||0);vehicle.widthMm=Math.max(0,+$("vWidth").value||0);
     vehicle.diameterMm=Math.max(0,+$("vDiameter").value||0);vehicle.wheelDiameterMm=Math.max(1,+$("vWheelDia").value||1);
     vehicle.trackWidthMm=Math.max(1,+$("vTrack").value||1);vehicle.gearRatio=Math.max(.001,+$("vGear").value||1);
-    vehicle.maxMotorRpm=Math.max(1,+$("vRpm").value||1);vehicle.encoderPulsesPerRev=Math.max(1,+$("vEncoder").value||1);
-    draw();setStatus(`Vagn: ${vehicle.name}`);
+    vehicle.maxMotorRpm=Math.max(1,+$("vRpm").value||1);
+vehicle.encoderPulsesPerRev=Math.max(1,+$("vEncoder").value||1);
+
+draw();
+setStatus(
+    `Vagn: ${vehicle.name} | min radie ${(vehicle.trackWidthMm/2).toFixed(0)} mm${radiusWarning()}`
+);
 };
 
 $("fitButton").onclick=fitDrawing;
 $("zoomInButton").onclick=()=>zoomAt(canvas.width/2,canvas.height/2,1.25);
 $("zoomOutButton").onclick=()=>zoomAt(canvas.width/2,canvas.height/2,1/1.25);
 
+// Fråga innan filväljaren öppnas om det finns osparade ändringar
+$("dxfFile").onclick=e=>{
+    if(cues.length&&!confirm(isDirty()
+        ?"Ny DXF tar bort alla Cuer och du har osparade ändringar.\nFortsätta?"
+        :"Ny DXF tar bort alla Cuer.\nFortsätta?"))e.preventDefault();
+};
+
 $("dxfFile").onchange=async e=>{
     const file=e.target.files[0];if(!file)return;
+    e.target.value="";
     try{
         const dxf=await file.text();resetCues();
         if(loadDrawing(file.name,dxf))setStatus("DXF laddad - ej sparad i ESP32");
+        markSaved();
     }catch{setStatus("Fel vid DXF-import")}
 };
 
@@ -2011,15 +2810,20 @@ $("saveDrawing").onclick=async()=>{
 
 $("saveShow").onclick=async()=>{
     if(!currentDXF){setStatus("Ingen ritning laddad");return}
+    if(!simActive)compactNodes();
     const json=JSON.stringify({version:8,drawing:{fileName:currentFileName,dxf:currentDXF},vehicle,nodes,cues});
-    setStatus("Sparar show...");
+
+    // Alltid lokal kopia först, så att inget går förlorat om ESP32 inte svarar
+    const blob=new Blob([json],{type:"application/json"}),a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);a.download="Roborock_Show.json";a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    markSaved();
+
+    setStatus("Sparad på datorn - sparar i ESP32...");
     try{
         const r=await fetch("/show",{method:"POST",headers:{"Content-Type":"application/json"},body:json});
-        if(!r.ok){setStatus("Fel vid sparning till ESP32");return}
-        const blob=new Blob([json],{type:"application/json"}),a=document.createElement("a");
-        a.href=URL.createObjectURL(blob);a.download="Roborock_Show.json";a.click();URL.revokeObjectURL(a.href);
-        setStatus("Show sparad i ESP32 och på datorn");
-    }catch{setStatus("Fel vid sparning av show")}
+        setStatus(r.ok?"Show sparad på datorn och i ESP32":"Sparad på datorn - FEL vid sparning i ESP32");
+    }catch{setStatus("Sparad på datorn - ESP32 svarar inte")}
 };
 
 function loadShow(show,msg){
@@ -2031,15 +2835,22 @@ function loadShow(show,msg){
         return x;
     });
     if(show.vehicle)vehicle={...vehicle,...show.vehicle};
+    compactNodes();
     selectedCue=cues.length?0:-1;splitAfter=-1;expandedCueName=null;
     cueNumber=new Set(cues.map(c=>c.name)).size;
-    updateCueList();updateCueInfo();updateUndoButton();
-    if(loadDrawing(show.drawing.fileName,show.drawing.dxf)){setStatus(msg);return true}
+    if(editEnabled)takeEditSnapshot();
+    updateCueList();updateCueInfo();updateEditButtons();
+    if(loadDrawing(show.drawing.fileName,show.drawing.dxf)){markSaved();setStatus(msg);return true}
     return false;
 }
 
+$("showFile").onclick=e=>{
+    if(!confirmDiscard("Ladda en annan showfil"))e.preventDefault();
+};
+
 $("showFile").onchange=async e=>{
     const file=e.target.files[0];if(!file)return;
+    e.target.value="";
     try{
         if(!loadShow(JSON.parse(await file.text()),"Showfil laddad från dator"))setStatus("Ogiltig showfil");
     }catch{setStatus("Felaktig showfil")}
@@ -2057,12 +2868,20 @@ async function loadSavedDrawing(){
         const r=await fetch("/drawing");if(!r.ok)return;
         const name=decodeURIComponent(r.headers.get("X-Filename")||"drawing.dxf"),dxf=await r.text();
         if(loadDrawing(name,dxf))setStatus("Sparad ritning laddad");
+        markSaved();
     }catch{}
 }
 
-resetCues();draw();
+// Varna om fliken stängs med osparade ändringar
+window.addEventListener("beforeunload",e=>{
+    if(!isDirty())return;
+    e.preventDefault();
+    e.returnValue="";
+});
+
+resetCues();draw();markSaved();
 loadSavedShow().then(ok=>{if(!ok)loadSavedDrawing()});
-updateUndoButton();
+updateEditButtons();
 </script>
 </body>
 </html>
@@ -2116,9 +2935,10 @@ static void handleSaveDrawing()
     }
 
     String name = server.header("X-Filename");
+    // Namnet är URL-kodat av webbsidan och sparas orört.
+    // Webbsidan avkodar det själv när ritningen hämtas.
     if (!name.length())
         name = "drawing.dxf";
-    name.replace("%20", " ");
 
     if (!drawingStorage.save(name, server.arg("plain")))
     {
