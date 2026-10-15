@@ -41,7 +41,8 @@ button.active{background:#4da3ff;color:#fff}.fileButton input{display:none}
 #drawingInfo,#cueInfo,#positionInfo,#status{margin:8px 0;font-size:15px}
 #positionInfo{font-family:monospace}
 #canvasContainer{width:100%;overflow:hidden;background:#ddd;border:2px solid #666}
-canvas{display:block;width:100%;height:auto;background:#ddd;touch-action:none;cursor:crosshair}
+/* Tydligt kors: svart med vit kant syns mot både ritning och bakgrund */
+canvas{display:block;width:100%;height:auto;background:#ddd;touch-action:none;cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32'%3E%3Cpath d='M16 2v10M16 20v10M2 16h10M20 16h10' stroke='white' stroke-width='4' stroke-linecap='square'/%3E%3Cpath d='M16 2v10M16 20v10M2 16h10M20 16h10' stroke='black' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='2' fill='black' stroke='white'/%3E%3C/svg%3E") 16 16,crosshair}
 canvas.dragging{cursor:grabbing}#status{font-weight:bold}
 
 #canvasRow{display:flex;gap:10px;align-items:stretch}
@@ -179,6 +180,8 @@ dialog::backdrop{background:#0008}
 <label>X mm<input id="nodeX" type="number"></label>
 <label>Y mm<input id="nodeY" type="number"></label>
 </div>
+<label id="nodeRadiusRow">Radie mm (0 = skarpt hörn)<input id="nodeRadius" type="number" min="0" step="10"></label>
+<div id="nodeRadiusInfo" style="font-size:13px;color:#aaa"></div>
 <div class="buttons"><button value="cancel">AVBRYT</button><button id="nodeSave" value="default">SPARA</button></div>
 </form>
 </dialog>
@@ -254,7 +257,7 @@ const panButton=$("panButton"),straightButton=$("straightButton"),followButton=$
 let entities=[],bounds=null,currentDXF="",currentFileName="",nodes=[],cues=[],selectedCue=-1,cueNumber=0,activeCueName="";
 let tool="pan",routeDrawing=false,routeHover=null,splitAfter=-1;
 let scale=1,fitScale=1,offsetX=0,offsetY=0,dragging=false,dragStartX=0,dragStartY=0,dragOffsetX=0,dragOffsetY=0;
-let editMode=null,editPathIndex=-1,editNodeId=-1,editNodeLabel="",editNodeMoved=false,editNodeDownX=0,editNodeDownY=0;
+let editMode=null,editPathIndex=-1,editGrabDX=0,editGrabDY=0,editNodeId=-1,editNodeLabel="",editNodeMoved=false,editNodeDownX=0,editNodeDownY=0;
 let dialogNodeId=-1,dialogNodeLabel="";
 let rotateTarget=null,rotateInsert=false,reverseTarget=null,reverseInsert=false;
 let editEnabled=false;
@@ -270,7 +273,9 @@ let vehicle={
 
 const MARGIN=60,SMALL_GRID_MM=250,LARGE_GRID_MM=1000,MIN_ZOOM=.1,MAX_ZOOM=50;
 const FOLLOW_STEP_MM=25,FOLLOW_SIMPLIFY_MM=120,START_TOLERANCE_MM=150;
-const NODE_HIT_PX=17,CONTROL_HIT_PX=12,CURVE_HIT_PX=15;
+const NODE_HIT_PX=17,CURVE_HIT_PX=15;
+// Grepp närmare än så här en befintlig dragpunkt flyttar den i stället för att skapa en ny
+const CONTROL_GRAB_MM=250;
 
 function setStatus(t){statusText.textContent=t}
 
@@ -1382,6 +1387,13 @@ function editNodeValue(id,label){
     if(id===null||!nodes[id])return;
     dialogNodeId=id;dialogNodeLabel=label;
     $("nodeTitle").textContent=label;$("nodeX").value=nodes[id].x;$("nodeY").value=nodes[id].y;
+    const pair=filletPair(id);
+    $("nodeRadiusRow").style.display=pair?"":"none";
+    $("nodeRadius").value=nodes[id].radius||0;
+    const g=pair&&filletGeometry(pair.a,pair.b);
+    $("nodeRadiusInfo").textContent=!pair?"":g&&g.clamped
+        ?`Begränsad till ${Math.round(g.r)} mm av segmentlängden`
+        :"Bågen delas lika mellan de två RAK-segmenten";
     $("nodeDialog").showModal();
 }
 
@@ -1399,6 +1411,15 @@ $("nodeSave").onclick=()=>{
     nodes[dialogNodeId].x=Math.round(x);
     nodes[dialogNodeId].y=Math.round(y);
 
+    const pair=filletPair(dialogNodeId);
+    let radiusText="";
+    if(pair){
+        const r=Math.max(0,Math.round(+$("nodeRadius").value||0));
+        if(r>0)nodes[dialogNodeId].radius=r;else delete nodes[dialogNodeId].radius;
+        const g=filletGeometry(pair.a,pair.b);
+        radiusText=!g?"":g.clamped?` - radie begränsad till ${Math.round(g.r)} mm`:` - radie ${Math.round(g.r)} mm`;
+    }
+
     const cue=currentCue();
     if(cue&&dialogNodeId===cue.endNode)connectNext(cue);
 
@@ -1407,7 +1428,7 @@ $("nodeSave").onclick=()=>{
     updateCueInfo();
     updateCueList();
     draw();
-    setStatus(`${dialogNodeLabel} uppdaterad${radiusWarning(cues.filter(c=>c.startNode===dialogNodeId||c.endNode===dialogNodeId))}`);
+    setStatus(`${dialogNodeLabel} uppdaterad${radiusText}${radiusWarning(cues.filter(c=>c.startNode===dialogNodeId||c.endNode===dialogNodeId))}`);
 };
 
 function beginNodeEdit(id,label,p){
@@ -1855,13 +1876,93 @@ function catmullPoint(p0,p1,p2,p3,t){
     };
 }
 
+function isDriveCue(c){return c&&c.type!=="ROT"&&c.type!=="VÄND"&&c.startNode!==null&&c.endNode!==null}
+
+function unitDir(a,b){
+    const dx=b.x-a.x,dy=b.y-a.y,l=Math.hypot(dx,dy);
+    return l>1e-6?{x:dx/l,y:dy/l}:null;
+}
+
+// Gemensam riktning i skarven mellan a (slutar) och b (börjar) i samma Cue.
+// RAK styr riktningen, två kurvor får medelriktningen. null = ingen skarv.
+function jointTangent(a,b){
+    if(!isDriveCue(a)||!isDriveCue(b)||a.name!==b.name||a.endNode!==b.startNode)return null;
+    const pa=getCuePoints(a),pb=getCuePoints(b);
+    const din=unitDir(pa[pa.length-2],pa[pa.length-1]),dout=unitDir(pb[0],pb[1]);
+    if(a.type==="RAK")return din;
+    if(b.type==="RAK")return dout;
+    if(!din||!dout)return din||dout;
+    return unitDir({x:0,y:0},{x:din.x+dout.x,y:din.y+dout.y});
+}
+
+// --------------------------------------------------
+// AVRUNDNING MELLAN TVÅ RAK
+// Radien sparas på skarvnoden. Noden är kvar i hörnet och bågen
+// delas på mitten: halva bågen hör till varje RAK.
+// --------------------------------------------------
+
+// Paret RAK som möts i noden (samma Cue), annars null
+function filletPair(id){
+    for(let i=0;i+1<cues.length;i++){
+        const a=cues[i],b=cues[i+1];
+        if(a.endNode===id&&b.startNode===id&&a.type==="RAK"&&b.type==="RAK"&&
+           a.name===b.name&&isDriveCue(a)&&isDriveCue(b))return{a,b};
+    }
+    return null;
+}
+
+function filletGeometry(a,b){
+    if(!isDriveCue(a)||!isDriveCue(b)||a.type!=="RAK"||b.type!=="RAK"||a.name!==b.name||a.endNode!==b.startNode)return null;
+    const P=nodes[a.endNode],want=P.radius||0;
+    if(want<=0)return null;
+    const A=nodes[a.startNode],B=nodes[b.endNode];
+    const u1=unitDir(A,P),u2=unitDir(P,B);
+    if(!u1||!u2)return null;
+    const cross=u1.x*u2.y-u1.y*u2.x,theta=Math.acos(Math.max(-1,Math.min(1,u1.x*u2.x+u1.y*u2.y)));
+    if(theta<.01||theta>Math.PI-.01)return null;
+    // Bågen får ta högst halva varje RAK, så att två avrundningar inte krockar
+    const tanH=Math.tan(theta/2);
+    const t=Math.min(want*tanH,Math.hypot(P.x-A.x,P.y-A.y)/2,Math.hypot(B.x-P.x,B.y-P.y)/2);
+    const r=t/tanH,side=cross>0?1:-1;
+    const T1={x:P.x-u1.x*t,y:P.y-u1.y*t},T2={x:P.x+u2.x*t,y:P.y+u2.y*t};
+    const C={x:T1.x-u1.y*r*side,y:T1.y+u1.x*r*side};
+    const a0=Math.atan2(T1.y-C.y,T1.x-C.x);
+    const at=f=>({x:C.x+r*Math.cos(a0+side*theta*f),y:C.y+r*Math.sin(a0+side*theta*f)});
+    return{P,T1,T2,r,want,at,clamped:r<want-.5};
+}
+
 function sampleCue(cue,steps=16){
     const pts=getCuePoints(cue);
     if(pts.length<2)return pts.map((p,i)=>({x:p.x,y:p.y,segment:Math.max(0,i-1)}));
-    if(pts.length===2)return[{x:pts[0].x,y:pts[0].y,segment:0},{x:pts[1].x,y:pts[1].y,segment:0}];
+
+    if(cue.type==="RAK"&&pts.length===2){
+        const i=cues.indexOf(cue);
+        const fs=i>0?filletGeometry(cues[i-1],cue):null,fe=i>=0?filletGeometry(cue,cues[i+1]):null;
+        if(fs||fe){
+            const out=[],n=Math.max(4,steps);
+            if(fs)for(let k=0;k<=n;k++)out.push({...fs.at(.5+.5*k/n),segment:0});
+            else out.push({x:pts[0].x,y:pts[0].y,segment:0});
+            if(fe)for(let k=0;k<=n;k++)out.push({...fe.at(.5*k/n),segment:0});
+            else out.push({x:pts[1].x,y:pts[1].y,segment:0});
+            return out;
+        }
+    }
+
+    // Kurvor jämnas ut mot grannsegmenten: tangenten i skarven sätts
+    // med en fiktiv punkt före start / efter slut
+    let first=pts[0],last=pts[pts.length-1];
+    if(cue.type!=="RAK"&&cue.endNode!==null){
+        const i=cues.indexOf(cue);
+        const ts=i>0?jointTangent(cues[i-1],cue):null;
+        const te=i>=0?jointTangent(cue,cues[i+1]):null;
+        if(ts){const m=2*Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y);first={x:pts[1].x-ts.x*m,y:pts[1].y-ts.y*m}}
+        if(te){const n=pts.length,m=2*Math.hypot(pts[n-1].x-pts[n-2].x,pts[n-1].y-pts[n-2].y);last={x:pts[n-2].x+te.x*m,y:pts[n-2].y+te.y*m}}
+    }
+
+    if(pts.length===2&&first===pts[0]&&last===pts[1])return[{x:pts[0].x,y:pts[0].y,segment:0},{x:pts[1].x,y:pts[1].y,segment:0}];
     const out=[];
     for(let i=0;i<pts.length-1;i++){
-        const p0=pts[Math.max(0,i-1)],p1=pts[i],p2=pts[i+1],p3=pts[Math.min(pts.length-1,i+2)];
+        const p0=i>0?pts[i-1]:first,p1=pts[i],p2=pts[i+1],p3=i+2<pts.length?pts[i+2]:last;
         for(let s=0;s<steps;s++){const p=catmullPoint(p0,p1,p2,p3,s/steps);out.push({x:p.x,y:p.y,segment:i})}
     }
     const e=pts[pts.length-1];out.push({x:e.x,y:e.y,segment:pts.length-2});return out;
@@ -1898,9 +1999,19 @@ function drawCue(cue,index){
         ctx.lineWidth=2;
         for(const q of rings){ctx.beginPath();ctx.arc(q.x,q.y,10,0,Math.PI*2);ctx.stroke()}
     }
-    if(index!==selectedCue)return;
-    for(const q of cue.path){
-        const p=worldToScreen(q.x,q.y);ctx.beginPath();ctx.arc(p.x,p.y,4,0,Math.PI*2);
+    // Avrundat hörn: streckade hjälplinjer till noden
+    const fe=editEnabled?filletGeometry(cue,cues[index+1]):null;
+    if(fe){
+        const a=worldToScreen(fe.T1.x,fe.T1.y),p=worldToScreen(fe.P.x,fe.P.y),b=worldToScreen(fe.T2.x,fe.T2.y);
+        ctx.strokeStyle="#888";ctx.lineWidth=1;ctx.setLineDash([5,4]);
+        ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(p.x,p.y);ctx.lineTo(b.x,b.y);ctx.stroke();ctx.setLineDash([]);
+    }
+
+    // Dragpunkter visas bara medan de flyttas
+    if(index!==selectedCue||editMode!=="control")return;
+    const q=cue.path[editPathIndex];
+    if(q){
+        const p=worldToScreen(q.x,q.y);ctx.beginPath();ctx.arc(p.x,p.y,5,0,Math.PI*2);
         ctx.fillStyle="#006cff";ctx.fill();ctx.strokeStyle="#fff";ctx.lineWidth=1;ctx.stroke();
     }
 }
@@ -2007,7 +2118,7 @@ function drawCues(){
 
 function segmentEndHeading(cue){
     if(!cue||cue.startNode===null)return 0;
-    const pts=getCuePoints(cue);
+    const pts=sampleCue(cue,16);
     if(pts.length<2)return 0;
     const a=pts[pts.length-2],b=pts[pts.length-1];
     return Math.atan2(b.y-a.y,b.x-a.x);
@@ -2039,6 +2150,10 @@ function vehiclePose(index){
     }
 
     const cue=cues[index];
+    if(isDriveCue(cue)){
+        const s=sampleCue(cue,16),e=s[s.length-1];
+        return{x:e.x,y:e.y,heading};
+    }
     const id=cue.endNode!==null?cue.endNode:cue.startNode;
     if(id===null||!nodes[id])return null;
 
@@ -2119,34 +2234,6 @@ function maxCurveControls(cue){
     return Math.max(0,Math.round(cueLength(cue)/500)-1);
 }
 
-function addCurveControls(cue){
-    if(!cue||(cue.type!=="KURVA"&&cue.type!=="FÖLJ")||cue.startNode===null||cue.endNode===null)return false;
-    const count=maxCurveControls(cue);
-    let added=false;
-    while(cue.path.length<count){
-        const pts=sampleCue(cue,24),lengths=Array(cue.path.length+1).fill(0);
-        for(let i=1;i<pts.length;i++)lengths[pts[i-1].segment]+=Math.hypot(pts[i].x-pts[i-1].x,pts[i].y-pts[i-1].y);
-        const segment=lengths.indexOf(Math.max(...lengths)),target=lengths[segment]/2;
-        let distance=0;
-        for(let i=1;i<pts.length;i++){
-            if(pts[i-1].segment!==segment)continue;
-            const step=Math.hypot(pts[i].x-pts[i-1].x,pts[i].y-pts[i-1].y);
-            if(step>0&&distance+step>=target){
-                const t=(target-distance)/step;
-                cue.path.splice(segment,0,{
-                    x:Math.round(pts[i-1].x+(pts[i].x-pts[i-1].x)*t),
-                    y:Math.round(pts[i-1].y+(pts[i].y-pts[i-1].y)*t)
-                });
-                added=true;
-                break;
-            }
-            distance+=step;
-        }
-        if(cue.path.length===lengths.length-1)break;
-    }
-    return added;
-}
-
 // Ta bort dragpunkter när kurvan blir kortare.
 // Hysteres så att punkter inte läggs till/tas bort om vartannat vid gränsen.
 // Punkten som tas bort är den som påverkar formen minst. "keep" tas aldrig bort.
@@ -2177,10 +2264,9 @@ function removeCurveControls(cue,keep=null){
     return removed;
 }
 
+// Punkter skapas bara när användaren greppar linjen, här tas de bara bort
 function syncCurveControls(cue,keep=null){
-    const added=addCurveControls(cue);
-    const removed=removeCurveControls(cue,keep);
-    return added||removed;
+    return removeCurveControls(cue,keep);
 }
 
 // Efter nodflytt: räkna om antalet punkter när kurvan är färdigdragen.
@@ -2228,15 +2314,6 @@ function hitNode(s,id){
     const p=worldToScreen(nodes[id].x,nodes[id].y);return Math.hypot(s.x-p.x,s.y-p.y)<=NODE_HIT_PX;
 }
 
-function hitControl(s,cue){
-    let best=null;
-    cue.path.forEach((q,i)=>{
-        const p=worldToScreen(q.x,q.y),d=Math.hypot(s.x-p.x,s.y-p.y);
-        if(d<=CONTROL_HIT_PX&&(!best||d<best.distance))best={index:i,distance:d};
-    });
-    return best;
-}
-
 function hitCurve(s,cue){
     if(cue.startNode===null||cue.endNode===null||cue.type==="ROT")return null;
     const p=sampleCue(cue,20);let best=null;
@@ -2275,7 +2352,7 @@ function radiusWarning(list=cues){
     const limit=vehicle.trackWidthMm/2;
     let minR=Infinity;
     for(const c of list){
-        if((c.type==="KURVA"||c.type==="FÖLJ")&&c.startNode!==null&&c.endNode!==null)minR=Math.min(minR,minCurveRadius(c));
+        if(isDriveCue(c))minR=Math.min(minR,minCurveRadius(c));
     }
     return minR<limit?` - VARNING: kurvradie ${Math.round(minR)} mm < ${Math.round(limit)} mm (rött)`:"";
 }
@@ -2314,10 +2391,13 @@ function enforceMinCurveRadius(cue){
     }
 }
 
-function beginControlEdit(i){
+// Punkten följer med relativt greppet så att kurvan inte hoppar
+function beginControlEdit(i,grab){
     const cue=currentCue();
     editMode="control";
     editPathIndex=i;
+    editGrabDX=cue.path[i].x-grab.x;
+    editGrabDY=cue.path[i].y-grab.y;
     canvas.style.cursor="grabbing";
 }
 
@@ -2327,8 +2407,8 @@ function updateControlEdit(w){
 
     // Ingen radiespärr: för snäva partier ritas röda i stället
     const activePoint={
-        x:Math.round(w.x),
-        y:Math.round(w.y)
+        x:Math.round(w.x+editGrabDX),
+        y:Math.round(w.y+editGrabDY)
     };
 
     cue.path[editPathIndex]=activePoint;
@@ -2340,19 +2420,18 @@ function updateControlEdit(w){
     draw();
 }
 
+// Grepp på linjen skapar en ny punkt där, upp till maxantalet.
+// Nära en befintlig punkt, eller vid max, flyttas närmaste punkt i stället.
 function beginCurveEdit(hit){
     const cue=currentCue();
-    if(cue.type==="RAK"||cue.type==="KURVA"||cue.type==="FÖLJ"){
-        const max=Math.max(1,maxCurveControls(cue));
-        if(cue.path.length>=max){
-            if(!cue.path.length)return;
-            let nearest=0;
-            for(let i=1;i<cue.path.length;i++){
-                if(Math.hypot(cue.path[i].x-hit.x,cue.path[i].y-hit.y)<Math.hypot(cue.path[nearest].x-hit.x,cue.path[nearest].y-hit.y))nearest=i;
-            }
-            beginControlEdit(nearest);
-            return;
-        }
+    let nearest=-1,nearestDist=Infinity;
+    cue.path.forEach((q,i)=>{
+        const d=Math.hypot(q.x-hit.x,q.y-hit.y);
+        if(d<nearestDist){nearestDist=d;nearest=i}
+    });
+    if(nearest>=0&&(nearestDist<CONTROL_GRAB_MM||cue.path.length>=Math.max(1,maxCurveControls(cue)))){
+        beginControlEdit(nearest,hit);
+        return;
     }
 
     cue.path.splice(hit.segment,0,{
@@ -2362,6 +2441,7 @@ function beginCurveEdit(hit){
 
     editMode="control";
     editPathIndex=hit.segment;
+    editGrabDX=0;editGrabDY=0;
 
     if(cue.type==="RAK")cue.type="KURVA";
 
@@ -2373,12 +2453,12 @@ function beginCurveEdit(hit){
 function endEdit(){
     editMode=null;
     editPathIndex=-1;
-    canvas.style.cursor="crosshair";
+    canvas.style.cursor="";
     updateCueInfo();
     updateCueList();
     draw();
     const cue=currentCue();
-    if(cue)setStatus(`Kontrollpunkt flyttad${radiusWarning([cue])}`);
+    if(cue)setStatus(`Kurva formad${radiusWarning([cue])}`);
 }
 
 function zoomAt(x,y,f){
@@ -2431,11 +2511,8 @@ canvas.addEventListener("pointerdown",e=>{
         if(hitNode(p,cue.startNode)){beginNodeEdit(cue.startNode,"START",p);canvas.setPointerCapture(e.pointerId);return}
         if(hitNode(p,cue.endNode)){beginNodeEdit(cue.endNode,"SLUT",p);canvas.setPointerCapture(e.pointerId);return}
 
-        const c=hitControl(p,cue);
-        if(c){beginControlEdit(c.index);canvas.setPointerCapture(e.pointerId);setStatus("Flyttar kontrollpunkt");return}
-
         const h=hitCurve(p,cue);
-        if(h){beginCurveEdit(h);canvas.setPointerCapture(e.pointerId);setStatus(editMode==="control"?"Flyttar kontrollpunkt":"Inga interna kontrollpunkter för denna banlängd");return}
+        if(h){beginCurveEdit(h);canvas.setPointerCapture(e.pointerId);setStatus("Formar kurva");return}
     }
 
     if(tool==="straight"){
@@ -2476,7 +2553,7 @@ canvas.addEventListener("pointermove",e=>{
     else if(dragging){offsetX=dragOffsetX+p.x-dragStartX;offsetY=dragOffsetY+p.y-dragStartY;draw()}
     else if(tool==="pan"){
         const cue=currentCue();
-        canvas.style.cursor=cue&&(hitNode(p,cue.startNode)||hitNode(p,cue.endNode)||hitControl(p,cue)||hitCurve(p,cue))?"grab":"crosshair";
+        canvas.style.cursor=cue&&(hitNode(p,cue.startNode)||hitNode(p,cue.endNode)||hitCurve(p,cue))?"grab":"";
     }
     updatePositionInfo(p.x,p.y);
 });
@@ -2484,7 +2561,7 @@ canvas.addEventListener("pointermove",e=>{
 function stopPointer(e){
     if(editMode==="node"){
         const id=editNodeId,label=editNodeLabel,moved=editNodeMoved;
-        editMode=null;editNodeId=-1;editNodeLabel="";editNodeMoved=false;canvas.style.cursor="crosshair";
+        editMode=null;editNodeId=-1;editNodeLabel="";editNodeMoved=false;canvas.style.cursor="";
         if(!moved)editNodeValue(id,label);
         else{
     const cue=currentCue();
@@ -2516,7 +2593,7 @@ function stopPointer(e){
 canvas.addEventListener("pointerup",stopPointer);
 
 canvas.addEventListener("pointercancel",e=>{
-    if(editMode==="node"){editMode=null;editNodeId=-1;editNodeLabel="";editNodeMoved=false;canvas.style.cursor="crosshair"}
+    if(editMode==="node"){editMode=null;editNodeId=-1;editNodeLabel="";editNodeMoved=false;canvas.style.cursor=""}
     else if(editMode)endEdit();
     routeDrawing=false;dragging=false;canvas.classList.remove("dragging");
     if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);draw();
